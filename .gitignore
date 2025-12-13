@@ -67,3 +67,7 @@ yarn-error.log
 
 # Configuration files with sensitive API keys
 config.js
+
+# Android keystore properties (contains passwords)
+android/keystore.properties
+**/keystore.properties
