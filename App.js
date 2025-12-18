@@ -14,6 +14,9 @@ import {
   ActivityIndicator,
   Platform,
   Linking,
+  TextInput,
+  Modal,
+  FlatList,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import "react-native-get-random-values"; // Required for crypto operations
@@ -27,6 +30,8 @@ import {
 import { sendAudioToTranscriptionAPIAlternative as sendAudioToTranscriptionAPI } from "./src/services/transcriptionService";
 import {
   buildExpenseRecordFromTranscript,
+  loadConfigLists,
+  refreshConfigLists,
 } from "./src/services/parsingLogic";
 import {
   appendExpenseRecordToSheet,
@@ -38,6 +43,16 @@ import {
   setSpreadsheetId,
   getSpreadsheetId,
 } from "./src/services/googleSheetsService";
+import {
+  getAccountNames,
+  getExpenseCategories,
+  saveAccountNames,
+  saveExpenseCategories,
+  resetToDefaults,
+  initializeDefaults,
+  getRecordingMode,
+  saveRecordingMode,
+} from "./src/services/configService";
 import { Config } from "./config";
 
 export default function App() {
@@ -51,11 +66,36 @@ export default function App() {
   const [spreadsheetId, setSpreadsheetIdState] = useState("");
   const [lastSavedRow, setLastSavedRow] = useState(null);
   const recordingTimeoutRef = useRef(null);
+  
+  // Settings UI state
+  const [showSettings, setShowSettings] = useState(false);
+  const [accountNames, setAccountNames] = useState([]);
+  const [expenseCategories, setExpenseCategories] = useState([]);
+  const [editingListType, setEditingListType] = useState(null); // 'accounts' or 'categories'
+  const [editingIndex, setEditingIndex] = useState(null);
+  const [editingValue, setEditingValue] = useState("");
+  const [recordingMode, setRecordingMode] = useState('hold'); // 'hold' or 'tap'
 
-  // Configure Google Sign-in and check status on mount
+  // Initialize app: load config lists and Google Auth
   useEffect(() => {
-    const initializeGoogleAuth = async () => {
+    const initializeApp = async () => {
       try {
+        // Initialize default config values if needed
+        await initializeDefaults();
+        
+        // Load config lists into cache
+        await loadConfigLists();
+        
+        // Load lists for UI display
+        const [accounts, categories, mode] = await Promise.all([
+          getAccountNames(),
+          getExpenseCategories(),
+          getRecordingMode(),
+        ]);
+        setAccountNames(accounts);
+        setExpenseCategories(categories);
+        setRecordingMode(mode);
+        
         // Configure Google Sign-in with your OAuth 2.0 Web Client ID
         // Get this from Google Cloud Console: https://console.cloud.google.com/
         // Create OAuth 2.0 credentials -> Web application -> Copy Client ID
@@ -90,12 +130,12 @@ export default function App() {
           }
         }
       } catch (err) {
-        console.error("Failed to initialize Google Auth:", err);
-        setError("Failed to initialize Google Sign-in: " + err.message);
+        console.error("Failed to initialize app:", err);
+        setError("Failed to initialize app: " + err.message);
       }
     };
 
-    initializeGoogleAuth();
+    initializeApp();
   }, []);
 
   const handleGoogleSignIn = async () => {
@@ -161,6 +201,154 @@ export default function App() {
     }
   };
 
+  // Settings handlers
+  const handleOpenSettings = async () => {
+    try {
+      const [accounts, categories, mode] = await Promise.all([
+        getAccountNames(),
+        getExpenseCategories(),
+        getRecordingMode(),
+      ]);
+      setAccountNames(accounts);
+      setExpenseCategories(categories);
+      setRecordingMode(mode);
+      setShowSettings(true);
+    } catch (err) {
+      console.error("Error loading settings:", err);
+      Alert.alert("Error", "Failed to load settings: " + err.message);
+    }
+  };
+
+  const handleCloseSettings = () => {
+    setShowSettings(false);
+    setEditingListType(null);
+    setEditingIndex(null);
+    setEditingValue("");
+  };
+
+  const handleAddItem = (listType) => {
+    setEditingListType(listType);
+    setEditingIndex(null);
+    setEditingValue("");
+  };
+
+  const handleEditItem = (listType, index) => {
+    const list = listType === 'accounts' ? accountNames : expenseCategories;
+    setEditingListType(listType);
+    setEditingIndex(index);
+    setEditingValue(list[index]);
+  };
+
+  const handleSaveItem = async () => {
+    if (!editingValue.trim()) {
+      Alert.alert("Error", "Item cannot be empty");
+      return;
+    }
+
+    try {
+      let updatedList;
+      if (editingListType === 'accounts') {
+        updatedList = [...accountNames];
+        if (editingIndex !== null) {
+          updatedList[editingIndex] = editingValue.trim();
+        } else {
+          updatedList.push(editingValue.trim());
+        }
+        await saveAccountNames(updatedList);
+        setAccountNames(updatedList);
+      } else {
+        updatedList = [...expenseCategories];
+        if (editingIndex !== null) {
+          updatedList[editingIndex] = editingValue.trim();
+        } else {
+          updatedList.push(editingValue.trim());
+        }
+        await saveExpenseCategories(updatedList);
+        setExpenseCategories(updatedList);
+      }
+      
+      // Refresh the cache in parsingLogic
+      await refreshConfigLists();
+      
+      setEditingListType(null);
+      setEditingIndex(null);
+      setEditingValue("");
+      setStatus("Settings saved successfully!");
+      setTimeout(() => setStatus("Idle"), 2000);
+    } catch (err) {
+      console.error("Error saving item:", err);
+      Alert.alert("Error", "Failed to save: " + err.message);
+    }
+  };
+
+  const handleDeleteItem = async (listType, index) => {
+    Alert.alert(
+      "Delete Item",
+      "Are you sure you want to delete this item?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              let updatedList;
+              if (listType === 'accounts') {
+                updatedList = accountNames.filter((_, i) => i !== index);
+                await saveAccountNames(updatedList);
+                setAccountNames(updatedList);
+              } else {
+                updatedList = expenseCategories.filter((_, i) => i !== index);
+                await saveExpenseCategories(updatedList);
+                setExpenseCategories(updatedList);
+              }
+              
+              // Refresh the cache in parsingLogic
+              await refreshConfigLists();
+              
+              setStatus("Item deleted successfully!");
+              setTimeout(() => setStatus("Idle"), 2000);
+            } catch (err) {
+              console.error("Error deleting item:", err);
+              Alert.alert("Error", "Failed to delete: " + err.message);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleResetToDefaults = async () => {
+    Alert.alert(
+      "Reset to Defaults",
+      "This will replace all your custom items with the default values. Are you sure?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reset",
+          style: "destructive",
+          onPress: async () => {
+              try {
+              await resetToDefaults();
+              const [accounts, categories] = await Promise.all([
+                getAccountNames(),
+                getExpenseCategories(),
+              ]);
+              setAccountNames(accounts);
+              setExpenseCategories(categories);
+              await refreshConfigLists();
+              setStatus("Reset to defaults successful!");
+              setTimeout(() => setStatus("Idle"), 2000);
+            } catch (err) {
+              console.error("Error resetting to defaults:", err);
+              Alert.alert("Error", "Failed to reset: " + err.message);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   // Cleanup timeout on unmount
   useEffect(() => {
     return () => {
@@ -170,14 +358,18 @@ export default function App() {
     };
   }, []);
 
+  // Handle recording button press for "hold" mode
   const handleRecordButtonPressIn = async () => {
+    if (recordingMode !== 'hold') return;
     if (isProcessing || isRecording) {
       return; // Prevent starting if already recording or processing
     }
-      await startRecordingProcess();
+    await startRecordingProcess();
   };
 
+  // Handle recording button release for "hold" mode
   const handleRecordButtonPressOut = async () => {
+    if (recordingMode !== 'hold') return;
     if (!isRecording) {
       return; // Only stop if actually recording
     }
@@ -189,6 +381,25 @@ export default function App() {
     await stopRecordingAndProcess();
   };
 
+  // Handle recording button tap for "tap" mode
+  const handleRecordButtonPress = async () => {
+    if (recordingMode !== 'tap') return;
+    if (isProcessing) {
+      return; // Prevent if processing
+    }
+    if (isRecording) {
+      // Stop recording
+      if (recordingTimeoutRef.current) {
+        clearTimeout(recordingTimeoutRef.current);
+        recordingTimeoutRef.current = null;
+      }
+      await stopRecordingAndProcess();
+    } else {
+      // Start recording
+      await startRecordingProcess();
+    }
+  };
+
   const startRecordingProcess = async () => {
     try {
       setError("");
@@ -196,7 +407,11 @@ export default function App() {
       
       await startRecording();
       setIsRecording(true);
-      setStatus("Recording… release to stop (auto-stops at 30s)");
+      if (recordingMode === 'hold') {
+        setStatus("Recording… release to stop (auto-stops at 30s)");
+      } else {
+        setStatus("Recording… tap to stop (auto-stops at 30s)");
+      }
       
       // Set auto-stop timeout for 30 seconds
       recordingTimeoutRef.current = setTimeout(async () => {
@@ -322,12 +537,19 @@ export default function App() {
     >
       <View style={styles.app}>
         <View style={styles.header}>
-          <View>
+          <View style={styles.headerTextContainer}>
             <Text style={styles.title}>Expense Recorder</Text>
             <Text style={styles.subtitle}>
               Capture purchases with a single tap of your voice.
             </Text>
           </View>
+          <TouchableOpacity
+            style={styles.settingsButton}
+            onPress={handleOpenSettings}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.settingsButtonText}>⚙️</Text>
+          </TouchableOpacity>
         </View>
 
         <View style={styles.recordSection}>
@@ -337,8 +559,9 @@ export default function App() {
               isRecording && styles.recordButtonRecording,
               isProcessing && styles.recordButtonDisabled,
             ]}
-            onPressIn={handleRecordButtonPressIn}
-            onPressOut={handleRecordButtonPressOut}
+            onPressIn={recordingMode === 'hold' ? handleRecordButtonPressIn : undefined}
+            onPressOut={recordingMode === 'hold' ? handleRecordButtonPressOut : undefined}
+            onPress={recordingMode === 'tap' ? handleRecordButtonPress : undefined}
             disabled={isProcessing}
             activeOpacity={0.8}
           >
@@ -349,7 +572,10 @@ export default function App() {
               ]}
             />
             <Text style={styles.recordButtonText}>
-              {isRecording ? "Recording… Release to Stop" : "Press & Hold to Record"}
+              {isRecording 
+                ? (recordingMode === 'hold' ? "Recording… Release to Stop" : "Recording… Tap to Stop")
+                : (recordingMode === 'hold' ? "Press & Hold to Record" : "Tap to Record")
+              }
             </Text>
           </TouchableOpacity>
 
@@ -465,6 +691,199 @@ export default function App() {
           </View>
         )}
       </View>
+
+      {/* Settings Modal */}
+      <Modal
+        visible={showSettings}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={handleCloseSettings}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Settings</Text>
+              <TouchableOpacity
+                style={styles.modalCloseButton}
+                onPress={handleCloseSettings}
+              >
+                <Text style={styles.modalCloseButtonText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.modalScrollView}>
+              {/* Recording Mode Section */}
+              <View style={styles.settingsSection}>
+                <Text style={styles.settingsSectionTitle}>Recording Mode</Text>
+                <View style={styles.recordingModeContainer}>
+                  <TouchableOpacity
+                    style={[
+                      styles.recordingModeOption,
+                      recordingMode === 'hold' && styles.recordingModeOptionActive,
+                    ]}
+                    onPress={async () => {
+                      await saveRecordingMode('hold');
+                      setRecordingMode('hold');
+                      setStatus("Recording mode changed to 'Press & Hold'");
+                      setTimeout(() => setStatus("Idle"), 2000);
+                    }}
+                  >
+                    <Text style={[
+                      styles.recordingModeOptionText,
+                      recordingMode === 'hold' && styles.recordingModeOptionTextActive,
+                    ]}>
+                      Press & Hold
+                    </Text>
+                    <Text style={styles.recordingModeDescription}>
+                      Press and hold to record, release to stop
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.recordingModeOption,
+                      recordingMode === 'tap' && styles.recordingModeOptionActive,
+                    ]}
+                    onPress={async () => {
+                      await saveRecordingMode('tap');
+                      setRecordingMode('tap');
+                      setStatus("Recording mode changed to 'Tap to Record'");
+                      setTimeout(() => setStatus("Idle"), 2000);
+                    }}
+                  >
+                    <Text style={[
+                      styles.recordingModeOptionText,
+                      recordingMode === 'tap' && styles.recordingModeOptionTextActive,
+                    ]}>
+                      Tap to Record
+                    </Text>
+                    <Text style={styles.recordingModeDescription}>
+                      Tap to start, tap again to stop (auto-stops at 30s)
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* Account Names Section */}
+              <View style={styles.settingsSection}>
+                <View style={styles.settingsSectionHeader}>
+                  <Text style={styles.settingsSectionTitle}>Account Names</Text>
+                  <TouchableOpacity
+                    style={styles.addButton}
+                    onPress={() => handleAddItem('accounts')}
+                  >
+                    <Text style={styles.addButtonText}>+ Add</Text>
+                  </TouchableOpacity>
+                </View>
+                <FlatList
+                  data={accountNames}
+                  keyExtractor={(item, index) => `account-${index}`}
+                  renderItem={({ item, index }) => (
+                    <View style={styles.listItem}>
+                      <Text style={styles.listItemText}>{item}</Text>
+                      <View style={styles.listItemActions}>
+                        <TouchableOpacity
+                          style={[styles.editButton, { marginRight: 8 }]}
+                          onPress={() => handleEditItem('accounts', index)}
+                        >
+                          <Text style={styles.editButtonText}>Edit</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.deleteButton}
+                          onPress={() => handleDeleteItem('accounts', index)}
+                        >
+                          <Text style={styles.deleteButtonText}>Delete</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+                  scrollEnabled={false}
+                />
+              </View>
+
+              {/* Expense Categories Section */}
+              <View style={styles.settingsSection}>
+                <View style={styles.settingsSectionHeader}>
+                  <Text style={styles.settingsSectionTitle}>Expense Categories</Text>
+                  <TouchableOpacity
+                    style={styles.addButton}
+                    onPress={() => handleAddItem('categories')}
+                  >
+                    <Text style={styles.addButtonText}>+ Add</Text>
+                  </TouchableOpacity>
+                </View>
+                <FlatList
+                  data={expenseCategories}
+                  keyExtractor={(item, index) => `category-${index}`}
+                  renderItem={({ item, index }) => (
+                    <View style={styles.listItem}>
+                      <Text style={styles.listItemText}>{item}</Text>
+                      <View style={styles.listItemActions}>
+                        <TouchableOpacity
+                          style={[styles.editButton, { marginRight: 8 }]}
+                          onPress={() => handleEditItem('categories', index)}
+                        >
+                          <Text style={styles.editButtonText}>Edit</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.deleteButton}
+                          onPress={() => handleDeleteItem('categories', index)}
+                        >
+                          <Text style={styles.deleteButtonText}>Delete</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+                  scrollEnabled={false}
+                />
+              </View>
+
+              {/* Reset Button */}
+              <TouchableOpacity
+                style={styles.resetButton}
+                onPress={handleResetToDefaults}
+              >
+                <Text style={styles.resetButtonText}>Reset Lists to Defaults</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+
+        {/* Edit Item Modal */}
+        {editingListType && (
+          <View style={styles.editModalOverlay}>
+            <View style={styles.editModalContent}>
+              <Text style={styles.editModalTitle}>
+                {editingIndex !== null ? 'Edit' : 'Add'} {editingListType === 'accounts' ? 'Account Name' : 'Expense Category'}
+              </Text>
+              <TextInput
+                style={styles.editInput}
+                value={editingValue}
+                onChangeText={setEditingValue}
+                placeholder={`Enter ${editingListType === 'cards' ? 'card name' : 'category'}`}
+                autoFocus={true}
+              />
+              <View style={styles.editModalActions}>
+                <TouchableOpacity
+                  style={[styles.cancelButton, { marginRight: 12 }]}
+                  onPress={() => {
+                    setEditingListType(null);
+                    setEditingIndex(null);
+                    setEditingValue("");
+                  }}
+                >
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.saveItemButton}
+                  onPress={handleSaveItem}
+                >
+                  <Text style={styles.saveItemButtonText}>Save</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+      </Modal>
     </ScrollView>
   );
 }
@@ -495,9 +914,14 @@ const styles = StyleSheet.create({
   },
   header: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
     marginBottom: 20,
+    width: "100%",
+  },
+  headerTextContainer: {
+    flex: 1,
+    marginRight: 12,
   },
   title: {
     fontSize: 24,
@@ -800,6 +1224,224 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   openSheetButtonText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  settingsButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: "#f3f4f6",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 36,
+    height: 36,
+    flexShrink: 0,
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+  },
+  settingsButtonText: {
+    fontSize: 18,
+    lineHeight: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: "flex-end",
+  },
+  modalContent: {
+    backgroundColor: "#ffffff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: "90%",
+    paddingBottom: 20,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e5e7eb",
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  modalCloseButton: {
+    padding: 4,
+  },
+  modalCloseButtonText: {
+    fontSize: 24,
+    color: "#6b7280",
+  },
+  modalScrollView: {
+    padding: 20,
+  },
+  settingsSection: {
+    marginBottom: 24,
+  },
+  settingsSectionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  settingsSectionTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#111827",
+  },
+  addButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    backgroundColor: "#2563eb",
+  },
+  addButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  listItem: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+    backgroundColor: "#f9fafb",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+  },
+  listItemText: {
+    flex: 1,
+    fontSize: 14,
+    color: "#111827",
+    marginRight: 12,
+  },
+  listItemActions: {
+    flexDirection: "row",
+  },
+  editButton: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 4,
+    backgroundColor: "#2563eb",
+  },
+  editButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  deleteButton: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 4,
+    backgroundColor: "#dc2626",
+  },
+  deleteButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  resetButton: {
+    marginTop: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    borderRadius: 8,
+    backgroundColor: "#f59e0b",
+    alignItems: "center",
+  },
+  resetButtonText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  recordingModeContainer: {
+    marginTop: 12,
+  },
+  recordingModeOption: {
+    padding: 16,
+    borderRadius: 8,
+    backgroundColor: "#f9fafb",
+    borderWidth: 2,
+    borderColor: "#e5e7eb",
+    marginBottom: 12,
+  },
+  recordingModeOptionActive: {
+    backgroundColor: "#eff6ff",
+    borderColor: "#2563eb",
+  },
+  recordingModeOptionText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#374151",
+    marginBottom: 4,
+  },
+  recordingModeOptionTextActive: {
+    color: "#2563eb",
+  },
+  recordingModeDescription: {
+    fontSize: 13,
+    color: "#6b7280",
+  },
+  editModalOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0, 0, 0, 0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  editModalContent: {
+    backgroundColor: "#ffffff",
+    borderRadius: 12,
+    padding: 20,
+    width: "85%",
+    maxWidth: 400,
+  },
+  editModalTitle: {
+    fontSize: 18,
+    fontWeight: "600",
+    color: "#111827",
+    marginBottom: 16,
+  },
+  editInput: {
+    borderWidth: 1,
+    borderColor: "#d1d5db",
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 16,
+    marginBottom: 16,
+    backgroundColor: "#ffffff",
+  },
+  editModalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+  },
+  cancelButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: "#f3f4f6",
+  },
+  cancelButtonText: {
+    color: "#374151",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  saveItemButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: "#2563eb",
+  },
+  saveItemButtonText: {
     color: "#ffffff",
     fontSize: 14,
     fontWeight: "600",

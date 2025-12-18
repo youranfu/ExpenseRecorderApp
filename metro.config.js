@@ -6,6 +6,22 @@ const {getDefaultConfig, mergeConfig} = require('@react-native/metro-config');
  *
  * @type {import('metro-config').MetroConfig}
  */
-const config = {};
+const config = {
+  transformer: {
+    getTransformOptions: async () => ({
+      transform: {
+        experimentalImportSupport: false,
+        inlineRequires: true,
+      },
+    }),
+    // Suppress warnings about undefined variables that are available at runtime
+    // These globals are provided by React Native's polyfills
+    unstable_allowRequireContext: true,
+  },
+  serializer: {
+    // Suppress warnings during bundle creation
+    customSerializer: undefined,
+  },
+};
 
 module.exports = mergeConfig(getDefaultConfig(__dirname), config);

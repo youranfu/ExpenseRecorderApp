@@ -3,52 +3,52 @@
  * These functions extract structured data from transcribed text.
  */
 
-// Configurable lists for card nicknames and expense categories
-// Edit these arrays to control the allowed card names and categories.
+import { getAccountNames, getExpenseCategories } from "./configService";
 
-export const CREDIT_CARD_NAMES = [
-  "Chase checking",
-  "BOA checking",
-  "Amazon Visa",
-  "Chase unlimited",
-  "Chase Sapphire",
-  "Chase freedom",
-  "Amex blue cash preferred",
-  "BOA cash reward",
-  "Discover it",
-  "Capital One",
-  "USBank Cashplus - YF",
-  "USBank Cashplus",
-  "CITI COSTCO",
-  "Wells Fargo 2%",
-  "Wayfair",
-  "IKEA",
-  "Walmart OnePay",
-  "Citi DoubleCash",
-];
+// Cached lists (loaded from AsyncStorage)
+let cachedAccountNames = null;
+let cachedExpenseCategories = null;
 
-export const EXPENSE_CATEGORIES = [
-  "Dining out",
-  "Grocery",
-  "Travel-personal",
-  "Travel-business",
-  "Rent/Mortgage",
-  "Utilities",
-  "Gaming or Entertainment",
-  "Household essentials",
-  "Donna related",
-  "Health related",
-  "Clothing or shoes",
-  "Gift purchase",
-  "Home maintenance",
-  "Home improvement",
-  "Subscription or membership",
-  "Misc",
-  "Car related",
-  "Commute",
-  "Tax related",
-  "Rental related",
-];
+/**
+ * Load account names and expense categories from storage
+ * Call this at app startup to cache the lists
+ */
+export async function loadConfigLists() {
+  try {
+    [cachedAccountNames, cachedExpenseCategories] = await Promise.all([
+      getAccountNames(),
+      getExpenseCategories(),
+    ]);
+  } catch (error) {
+    console.error("Error loading config lists:", error);
+    // Fallback to empty arrays if loading fails
+    cachedAccountNames = [];
+    cachedExpenseCategories = [];
+  }
+}
+
+/**
+ * Get cached account names (synchronous)
+ * Returns empty array if not loaded yet
+ */
+function getCachedAccountNames() {
+  return cachedAccountNames || [];
+}
+
+/**
+ * Get cached expense categories (synchronous)
+ * Returns empty array if not loaded yet
+ */
+function getCachedExpenseCategories() {
+  return cachedExpenseCategories || [];
+}
+
+/**
+ * Refresh the cached lists from storage
+ */
+export async function refreshConfigLists() {
+  await loadConfigLists();
+}
 
 /**
  * Builds an expense record object from a transcript string.
@@ -208,7 +208,8 @@ function bestMatchFromList(transcript, candidates, minScore) {
 }
 
 export function extractCardName(transcript) {
-  return bestMatchFromList(transcript, CREDIT_CARD_NAMES, 0.3);
+  const cardNames = getCachedAccountNames();
+  return bestMatchFromList(transcript, cardNames, 0.3);
 }
 
 export function extractExpenseAmount(transcript) {
@@ -290,7 +291,8 @@ export function extractExpenseAmount(transcript) {
 }
 
 export function extractExpenseCategory(transcript) {
-  return bestMatchFromList(transcript, EXPENSE_CATEGORIES, 0.25);
+  const categories = getCachedExpenseCategories();
+  return bestMatchFromList(transcript, categories, 0.25);
 }
 
 export function extractDescription(transcript) {

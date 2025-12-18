@@ -198,7 +198,7 @@ export default function App() {
 
           <Text style={styles.hint}>
             Speak naturally: date, how much, which card, what category, and description
-            (for example: "Charge $335.78 on the Costco credit card. Date November 30th.
+            (for example: "Charge $335.78 on CITI COSTCO. Date November 30th.
             Category is food. The description is 'dinner with friends'"). The first 30
             seconds will be sent to the AI.
           </Text>
