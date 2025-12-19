@@ -155,6 +155,11 @@ buildTypes {
 }
 ```
 
+### 3b. Run parsing logic tests
+```bash
+npm test -- src/services/__tests__/parsingLogic.test.js
+```
+
 ### 4. Build Release APK
 
 ```bash
@@ -178,24 +183,24 @@ You have several options to install the APK on your device:
 **Steps:**
 1. Connect your phone to your computer via USB
 2. Verify connection:
-   ```bash
-   adb devices
-   ```
-   (Should show your device)
+```bash
+adb devices
+```
+(Should show your device)
 
 3. Install the APK:
-   ```bash
-   cd ExpenseRecorderApp/android
-   adb install app/build/outputs/apk/release/app-release.apk
-   ```
+```bash
+cd ExpenseRecorderApp/android
+adb install app/build/outputs/apk/release/app-release.apk
+```
 
 4. The app will install automatically and appear on your phone!
 
 **If you get "INSTALL_FAILED_UPDATE_INCOMPATIBLE":**
 - Uninstall any existing debug version first:
-  ```bash
-  adb uninstall com.expenserecorderapp
-  ```
+```bash
+adb uninstall com.expenserecorderapp
+```
 - Then install the release APK again
 
 ---
