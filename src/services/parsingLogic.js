@@ -185,10 +185,26 @@ function bestMatchFromList(transcript, candidates, minScore) {
     const candidateNorm = normalizeForMatch(candidate);
     if (!candidateNorm) continue;
 
-    // If candidate string (normalized) appears as a phrase, give it a strong boost.
-    let score = normalizedTranscript.includes(candidateNorm) ? 1 : 0;
+    // If candidate string (normalized) appears as a complete phrase with word boundaries,
+    // give it a strong boost. Use word boundary matching to avoid substring issues
+    // (e.g., "cash" matching inside "doublecash").
+    // IMPORTANT: Check if the entire candidate phrase appears as a contiguous sequence,
+    // not just that all its words appear somewhere in the transcript.
+    const candidateTokens = candidateNorm.split(/\s+/).filter(Boolean);
+    let phraseMatch = false;
+    if (candidateTokens.length > 0) {
+      // Escape special regex characters in each token
+      const escapedTokens = candidateTokens.map(token => 
+        token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      );
+      // Create a regex that matches the entire phrase as a contiguous sequence with word boundaries
+      const phraseRegex = new RegExp(`\\b${escapedTokens.join('\\s+')}\\b`, 'i');
+      phraseMatch = phraseRegex.test(normalizedTranscript);
+    }
+    let score = phraseMatch ? 1 : 0;
 
-    const cTokens = candidateNorm.split(" ").filter(Boolean);
+    // Use textTokens to apply stemming to candidate tokens as well
+    const cTokens = textTokens(candidate);
     if (cTokens.length) {
       let overlap = 0;
       for (const tok of cTokens) {
@@ -198,7 +214,8 @@ function bestMatchFromList(transcript, candidates, minScore) {
       score = Math.max(score, tokenScore);
     }
 
-    if (score > bestScore) {
+    // When scores are equal, prefer longer (more specific) matches
+    if (score > bestScore || (score === bestScore && candidate.length > best.length)) {
       bestScore = score;
       best = candidate;
     }
@@ -315,7 +332,7 @@ export function extractCardName(transcript) {
   // STEP 4: Clean up the extracted text
   const cleanedCardText = cardText
     .replace(/^[\s:,-]+/i, "") // Remove leading separators
-    .replace(/[\s:,-]+$/i, "") // Remove trailing separators
+    .replace(/[\s:,-.]+$/i, "") // Remove trailing separators and periods
     .trim();
   
   if (!cleanedCardText) {

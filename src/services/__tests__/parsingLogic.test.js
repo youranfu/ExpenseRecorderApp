@@ -23,39 +23,53 @@ jest.mock('../configService', () => ({
     "Amazon Visa",
     "Chase unlimited",
     "Chase Sapphire",
-    "Chase freedom",
+    "Chase freedom rotate",
     "Amex blue cash preferred",
     "BOA cash reward",
     "Discover it",
-    "Capital One",
-    "USBank Cashplus - YF",
-    "USBank Cashplus",
-    "CITI COSTCO",
-    "Wells Fargo 2%",
+    "Capital One Quicksilver",
+    "YF USBank Cashplus",
+    "LL USBank Cashplus",
+    "CITI Costco",
+    "Wells Fargo Active Cash",
     "Wayfair",
     "IKEA",
+    "Walmart OnePay",
+    "Citi DoubleCash",
+    "Cash",
+    "Business Checking",
+    "Ink Business",
   ])),
   getExpenseCategories: jest.fn(() => Promise.resolve([
-    "Dining out",
-    "Grocery",
-    "Travel-personal",
-    "Travel-business",
-    "Rent/Mortgage",
-    "Utilities",
-    "Gaming or Entertainment",
-    "Household essentials",
-    "Donna related",
-    "Health related",
-    "Clothing or shoes",
-    "Gift purchase",
-    "Home maintenance",
-    "Home improvement",
-    "Subscription or membership",
-    "Misc",
-    "Car related",
+    "Business",
+    "Car fuel",
+    "Car insurance",
+    "Car maintenance",
+    "Clothing",
     "Commute",
+    "Dining",
+    "Donna related",
+    "Education",
+    "Entertainment",
+    "Gift purchase",
+    "Grocery",
+    "Home improvement",
+    "Home insurance and tax",
+    "Home maintenance",
+    "Household items",
+    "Medical",
+    "Misc",
+    "Mortgage",
+    "Rental expenses",
+    "Subscription or membership",
     "Tax related",
-    "Rental related",
+    "Travel-business",
+    "Travel-personal",
+    "Utility Electricity",
+    "Utility Gas",
+    "Utility Phone",
+    "Utility Internet",
+    "Utility Water",
   ])),
 }));
 
@@ -82,7 +96,7 @@ describe('parsingLogic', () => {
     });
 
     test('extracts amount with single digit cents (pads to 2 digits)', () => {
-      const transcript = "Charge $30.5 to Chase Sapphire. Date is today. Category is Dining out. Description is dinner with friends";
+      const transcript = "Charge $30.5 to Chase Sapphire. Date is today. Category is Dining. Description is dinner with friends";
       expect(extractExpenseAmount(transcript)).toBe("30.50");
     });
 
@@ -102,7 +116,7 @@ describe('parsingLogic', () => {
     });
 
     test('extracts amount when description contains account name', () => {
-      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining out. Description is dinner at Chase restaurant";
+      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining. Description is dinner at Chase restaurant";
       expect(extractExpenseAmount(transcript)).toBe("50.00");
     });
 
@@ -125,17 +139,17 @@ describe('parsingLogic', () => {
 
     test('extracts account name with special characters', () => {
       const transcript = "Charge $4,000.50 to CITI COSTCO. Date is November 30th. Category is Grocery. Description is regular weekend shopping";
-      expect(extractCardName(transcript)).toBe("CITI COSTCO");
+      expect(extractCardName(transcript)).toBe("CITI Costco");
     });
 
     test('extracts account name when description contains account name', () => {
-      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining out. Description is dinner at Chase restaurant";
-      expect(extractCardName(transcript)).toBe("Wells Fargo 2%");
+      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining. Description is dinner at Chase restaurant";
+      expect(extractCardName(transcript)).toBe("Wells Fargo Active Cash");
     });
 
     test('extracts account name with dash', () => {
       const transcript = "Charge $200 to USBank Cashplus - YF. Date is today. Category is Utilities. Description is electricity bill";
-      expect(extractCardName(transcript)).toBe("USBank Cashplus - YF");
+      expect(extractCardName(transcript)).toBe("YF USBank Cashplus");
     });
 
     test('extracts account name when description contains category name', () => {
@@ -157,6 +171,36 @@ describe('parsingLogic', () => {
       const transcript = "Charge $30 to chase unlimited. Date is today. Category is Misc. Description is test";
       expect(extractCardName(transcript)).toBe("Chase unlimited");
     });
+
+    test('distinguishes between "Cash" and "Citi DoubleCash" correctly', () => {
+      // Test that "Cash" matches "Cash" and not "Citi DoubleCash"
+      const transcript1 = "Charge $50 to Cash. Date is today. Category is Misc. Description is cash payment";
+      expect(extractCardName(transcript1)).toBe("Cash");
+      
+      // Test that "Citi DoubleCash" matches "Citi DoubleCash" and not "Cash"
+      const transcript2 = "Charge $100 to Citi DoubleCash. Date is today. Category is Misc. Description is credit card payment";
+      expect(extractCardName(transcript2)).toBe("Citi DoubleCash");
+    });
+
+    test('distinguishes between "Cash" and "Wells Fargo Active Cash" correctly', () => {
+      // Test that "Cash" matches "Cash" and not "Wells Fargo Active Cash"
+      const transcript1 = "Charge $50 to Cash. Date is today. Category is Misc. Description is cash payment";
+      expect(extractCardName(transcript1)).toBe("Cash");
+      
+      // Test that "Wells Fargo Active Cash" matches "Wells Fargo Active Cash" and not "Cash"
+      const transcript2 = "Charge $100 to Wells Fargo Active Cash. Date is today. Category is Misc. Description is credit card payment";
+      expect(extractCardName(transcript2)).toBe("Wells Fargo Active Cash");
+    });
+
+    test('distinguishes between "Cash" and "YF USBank Cashplus" correctly', () => {
+      // Test that "Cash" matches "Cash" and not "YF USBank Cashplus"
+      const transcript1 = "Charge $50 to Cash. Date is today. Category is Misc. Description is cash payment";
+      expect(extractCardName(transcript1)).toBe("Cash");
+      
+      // Test that "YF USBank Cashplus" matches "YF USBank Cashplus" correctly
+      const transcript2 = "Charge $100 to YF USBank Cashplus. Date is today. Category is Misc. Description is credit card payment";
+      expect(extractCardName(transcript2)).toBe("YF USBank Cashplus");
+    });
   });
 
   describe('extractExpenseCategory', () => {
@@ -171,8 +215,8 @@ describe('parsingLogic', () => {
     });
 
     test('extracts category when description contains account name', () => {
-      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining out. Description is dinner at Chase restaurant";
-      expect(extractExpenseCategory(transcript)).toBe("Dining out");
+      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining. Description is dinner at Chase restaurant";
+      expect(extractExpenseCategory(transcript)).toBe("Dining");
     });
 
     test('handles "category" without "is"', () => {
@@ -181,8 +225,8 @@ describe('parsingLogic', () => {
     });
 
     test('handles "category is" format', () => {
-      const transcript = "Charge $200 to USBank Cashplus. Date is today. Category is Utilities. Description is electricity bill";
-      expect(extractExpenseCategory(transcript)).toBe("Utilities");
+      const transcript = "Charge $200 to USBank Cashplus. Date is today. Category is Utility Electricity. Description is electricity bill";
+      expect(extractExpenseCategory(transcript)).toBe("Utility Electricity");
     });
 
     test('handles category with multiple words', () => {
@@ -191,8 +235,8 @@ describe('parsingLogic', () => {
     });
 
     test('handles category with special characters', () => {
-      const transcript = "Charge $1,200 to BOA checking. Date is December 1st. Category is Rent/Mortgage. Description is monthly rent";
-      expect(extractExpenseCategory(transcript)).toBe("Rent/Mortgage");
+      const transcript = "Charge $1,200 to BOA checking. Date is December 1st. Category is Mortgage. Description is monthly rent";
+      expect(extractExpenseCategory(transcript)).toBe("Mortgage");
     });
 
     test('returns extracted text when category not in list', () => {
@@ -213,7 +257,7 @@ describe('parsingLogic', () => {
     });
 
     test('extracts description when it contains account name', () => {
-      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining out. Description is dinner at Chase restaurant";
+      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining. Description is dinner at Chase restaurant";
       expect(extractDescription(transcript)).toBe("dinner at Chase restaurant");
     });
 
@@ -313,7 +357,7 @@ describe('parsingLogic', () => {
       
       expect(result).toEqual({
         date: `${expectedYear}-11-30`,
-        card_name: "CITI COSTCO",
+        card_name: "CITI Costco",
         expense_amount: "4000.50",
         expense_category: "Grocery",
         description: "regular weekend shopping",
@@ -321,16 +365,16 @@ describe('parsingLogic', () => {
     });
 
     test('builds expense record when description contains account name', () => {
-      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining out. Description is dinner at Chase restaurant";
+      const transcript = "Charge $50 to Wells Fargo 2%. Date is December 5th. Category is Dining. Description is dinner at Chase restaurant";
       const result = buildExpenseRecordFromTranscript(transcript);
       const today = new Date();
       const expectedYear = today.getFullYear();
       
       expect(result).toEqual({
         date: `${expectedYear}-12-05`,
-        card_name: "Wells Fargo 2%",
+        card_name: "Wells Fargo Active Cash",
         expense_amount: "50.00",
-        expense_category: "Dining out",
+        expense_category: "Dining",
         description: "dinner at Chase restaurant",
       });
     });
@@ -358,7 +402,7 @@ describe('parsingLogic', () => {
       
       expect(result).toEqual({
         date: `${expectedYear}-12-01`,
-        card_name: "Chase freedom",
+        card_name: "Chase freedom rotate",
         expense_amount: "325.39",
         expense_category: "Gift purchase",
         description: "birthday gift",
@@ -391,6 +435,21 @@ describe('parsingLogic', () => {
       expect(result.expense_amount).toBe("30.00");
       expect(result.expense_category).toBe("Misc");
       expect(result.description).toBe("test");
+    });
+
+    test('handles "Inc Business" transcript with fuzzy matching', () => {
+      const transcript = "Charge $20 to Inc Business. Category is Dining Out. Description is Lunch";
+      const result = buildExpenseRecordFromTranscript(transcript);
+      const today = new Date();
+      const expectedDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      
+      expect(result.date).toBe(expectedDate); // Defaults to today
+      // Note: "Inc Business" matches "Business Checking" (both have "business") 
+      // To match "Ink Business", use "Ink Business" in transcript
+      expect(result.card_name).toBe("Business Checking"); // Fuzzy match: "Inc Business" -> "Business Checking" (both contain "business")
+      expect(result.expense_amount).toBe("20.00");
+      expect(result.expense_category).toBe("Dining"); // Case-insensitive match: "Dining Out" -> "Dining"
+      expect(result.description).toBe("Lunch");
     });
   });
 });
