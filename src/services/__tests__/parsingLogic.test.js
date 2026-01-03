@@ -180,6 +180,10 @@ describe('parsingLogic', () => {
       // Test that "Citi DoubleCash" matches "Citi DoubleCash" and not "Cash"
       const transcript2 = "Charge $100 to Citi DoubleCash. Date is today. Category is Misc. Description is credit card payment";
       expect(extractCardName(transcript2)).toBe("Citi DoubleCash");
+      
+      // Test that "double cash" (spoken as two words) matches "Citi DoubleCash" and not "Cash"
+      const transcript3 = "charge $26.65 to double cash. Category is entertainment. Description is just dance fee";
+      expect(extractCardName(transcript3)).toBe("Citi DoubleCash");
     });
 
     test('distinguishes between "Cash" and "Wells Fargo Active Cash" correctly', () => {
@@ -200,6 +204,36 @@ describe('parsingLogic', () => {
       // Test that "YF USBank Cashplus" matches "YF USBank Cashplus" correctly
       const transcript2 = "Charge $100 to YF USBank Cashplus. Date is today. Category is Misc. Description is credit card payment";
       expect(extractCardName(transcript2)).toBe("YF USBank Cashplus");
+    });
+
+    test('handles partial matches correctly', () => {
+      // Test 1: "YF cash plus" should match "YF USBank Cashplus"
+      const transcript1 = "charge $25.64 to YF cash plus. Category is Misc. Description is test";
+      expect(extractCardName(transcript1)).toBe("YF USBank Cashplus");
+      
+      // Test 2: "blue cash" should match "Amex blue cash preferred"
+      const transcript2 = "charge $25.64 to blue cash. Category is Misc. Description is test";
+      expect(extractCardName(transcript2)).toBe("Amex blue cash preferred");
+      
+      // Test 3: "cash preferred" should match "Amex blue cash preferred"
+      const transcript3 = "charge $25.64 to cash preferred. Category is Misc. Description is test";
+      expect(extractCardName(transcript3)).toBe("Amex blue cash preferred");
+      
+      // Test 4: "cash reward" should match "BOA cash reward"
+      const transcript4 = "charge $25.64 to cash reward. Category is Misc. Description is test";
+      expect(extractCardName(transcript4)).toBe("BOA cash reward");
+      
+      // Test 5: "Active Cash" should match "Wells Fargo Active Cash"
+      const transcript5 = "charge $25.64 to Active Cash. Category is Misc. Description is test";
+      expect(extractCardName(transcript5)).toBe("Wells Fargo Active Cash");
+      
+      // Test 6: "double Cash" should match "Citi DoubleCash"
+      const transcript6 = "charge $25.64 to double Cash. Category is Misc. Description is test";
+      expect(extractCardName(transcript6)).toBe("Citi DoubleCash");
+      
+      // Test 7: "Cash" should match "Cash" (not other accounts with "cash" in name)
+      const transcript7 = "charge $25.64 to Cash. Category is Misc. Description is test";
+      expect(extractCardName(transcript7)).toBe("Cash");
     });
   });
 

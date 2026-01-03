@@ -191,37 +191,225 @@ function bestMatchFromList(transcript, candidates, minScore) {
     // IMPORTANT: Check if the entire candidate phrase appears as a contiguous sequence,
     // not just that all its words appear somewhere in the transcript.
     const candidateTokens = candidateNorm.split(/\s+/).filter(Boolean);
+    const transcriptTokensArray = normalizedTranscript.split(/\s+/).filter(Boolean);
+    const transcriptIsMultiWord = transcriptTokensArray.length > 1;
+    
     let phraseMatch = false;
+    let partialPhraseMatch = false; // Track if transcript phrase appears within candidate
+    
     if (candidateTokens.length > 0) {
-      // Escape special regex characters in each token
-      const escapedTokens = candidateTokens.map(token => 
-        token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      );
-      // Create a regex that matches the entire phrase as a contiguous sequence with word boundaries
-      const phraseRegex = new RegExp(`\\b${escapedTokens.join('\\s+')}\\b`, 'i');
-      phraseMatch = phraseRegex.test(normalizedTranscript);
+      // Check if transcript phrase appears as a contiguous sequence within the candidate
+      // For example, "blue cash" should match "Amex blue cash preferred"
+      // This check is done FIRST when transcript has multiple words to prefer longer matches
+      if (transcriptIsMultiWord) {
+        // Filter out numbers and common words like "to", "for", etc. to get meaningful phrase
+        const commonWords = new Set(['to', 'for', 'on', 'at', 'in', 'the', 'a', 'an']);
+        const meaningfulTokens = transcriptTokensArray.filter(tok => 
+          !/^\d+$/.test(tok) && !commonWords.has(tok.toLowerCase())
+        );
+        
+        // Check if meaningful tokens can form a phrase within the candidate
+        // We only need meaningfulTokens.length <= candidateTokens.length (not all transcript tokens)
+        if (meaningfulTokens.length >= 2 && meaningfulTokens.length <= candidateTokens.length) {
+          // Try matching the meaningful phrase as a contiguous sequence
+          const transcriptPhrase = meaningfulTokens.join(' ');
+          const escapedTranscriptPhrase = transcriptPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const partialPhraseRegex = new RegExp(`\\b${escapedTranscriptPhrase}\\b`, 'i');
+          partialPhraseMatch = partialPhraseRegex.test(candidateNorm);
+          
+          // Fallback: check if all meaningful tokens appear in order in the candidate (with word boundaries)
+          // This handles cases where the phrase might be split by other words
+          if (!partialPhraseMatch && meaningfulTokens.length >= 2) {
+            let allTokensFoundInOrder = true;
+            let searchStart = 0;
+            for (const tok of meaningfulTokens) {
+              const escapedTok = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const tokenRegex = new RegExp(`\\b${escapedTok}\\b`, 'i');
+              const remainingText = candidateNorm.substring(searchStart);
+              const match = remainingText.match(tokenRegex);
+              if (!match) {
+                allTokensFoundInOrder = false;
+                break;
+              }
+              // Update searchStart to after the current match (relative to full string)
+              searchStart = searchStart + match.index + match[0].length;
+            }
+            // If all tokens found in order and candidate is multi-word, treat as partial match
+            if (allTokensFoundInOrder && candidateTokens.length > 1) {
+              partialPhraseMatch = true;
+            }
+          }
+        }
+      }
+      
+      // If candidate string (normalized) appears as a complete phrase with word boundaries,
+      // give it a strong boost. Use word boundary matching to avoid substring issues
+      // (e.g., "cash" matching inside "doublecash").
+      // IMPORTANT: For single-word candidates, only give perfect score if transcript is also single-word
+      if (!partialPhraseMatch) {
+        const escapedTokens = candidateTokens.map(token => 
+          token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        );
+        // Create a regex that matches the entire phrase as a contiguous sequence with word boundaries
+        const phraseRegex = new RegExp(`\\b${escapedTokens.join('\\s+')}\\b`, 'i');
+        phraseMatch = phraseRegex.test(normalizedTranscript);
+        
+        // For single-word candidates with multi-word transcripts, don't give perfect score
+        // (e.g., "Cash" matching "blue cash" should not get 1.0)
+        if (phraseMatch && candidateTokens.length === 1 && transcriptIsMultiWord) {
+          phraseMatch = false; // Downgrade to token matching instead
+        }
+      }
+      
+      // Also check if compound words in the candidate appear as phrases in the transcript
+      // For example, "doublecash" in "Citi DoubleCash" should match "double cash" in transcript
+      if (!phraseMatch && !partialPhraseMatch) {
+        for (const tok of candidateTokens) {
+          const splitTokens = splitCompoundWord(tok);
+          if (splitTokens.length > 1) {
+            // Check if the split tokens appear as a phrase in the transcript
+            const escapedSplitTokens = splitTokens.map(token => 
+              token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            );
+            const splitPhraseRegex = new RegExp(`\\b${escapedSplitTokens.join('\\s+')}\\b`, 'i');
+            if (splitPhraseRegex.test(normalizedTranscript)) {
+              phraseMatch = true;
+              break; // Found a compound word phrase match
+            }
+          }
+        }
+      }
     }
-    let score = phraseMatch ? 1 : 0;
+    
+    // Score: full phrase match = 1.0, partial phrase match = 1.0 (treat as perfect match)
+    // Partial phrase matches are when transcript phrase appears within candidate (e.g., "blue cash" in "Amex blue cash preferred")
+    // These should be treated as perfect matches to beat single-word candidates
+    // IMPORTANT: partialPhraseMatch is set above in the candidateTokens block, so it's available here
+    let score = 0;
+    if (phraseMatch) {
+      score = 1;
+    } else if (partialPhraseMatch) {
+      score = 1; // Partial phrase matches get perfect score
+    }
 
     // Use textTokens to apply stemming to candidate tokens as well
     const cTokens = textTokens(candidate);
     if (cTokens.length) {
       let overlap = 0;
+      let hasCompoundMatch = false; // Track if any compound word was split and matched
+      
       for (const tok of cTokens) {
-        if (transcriptTokens.has(tok)) overlap += 1;
+        if (transcriptTokens.has(tok)) {
+          overlap += 1;
+        } else {
+          // Handle compound words: if a candidate token doesn't match directly,
+          // try splitting it into potential words and check if those words match.
+          // For example, "doublecash" → ["double", "cash"]
+          // This handles cases where "double cash" (two words) should match "DoubleCash" (compound word)
+          const splitTokens = splitCompoundWord(tok);
+          if (splitTokens.length > 1) {
+            // Check if all split tokens are present in the transcript
+            const allSplitTokensMatch = splitTokens.every(splitTok => transcriptTokens.has(splitTok));
+            if (allSplitTokensMatch) {
+              overlap += 1; // Count the compound word as one match
+              hasCompoundMatch = true; // Mark that we matched via compound word splitting
+            }
+          }
+        }
       }
-      const tokenScore = overlap / cTokens.length;
-      score = Math.max(score, tokenScore);
+      
+      const baseTokenScore = overlap / cTokens.length;
+      
+      // Bonus: if compound words matched, boost the score
+      // This helps "Citi DoubleCash" (score ~0.5 + bonus) beat "Cash" (score 1.0) when "double cash" is present
+      // The bonus is proportional to how well the compound word matched
+      const compoundBonus = hasCompoundMatch ? 0.4 : 0;
+      let tokenScore = Math.min(1.0, baseTokenScore + compoundBonus);
+      
+      // When transcript is multi-word and candidate is single-word, reduce the token score
+      // This ensures multi-word candidates with partialPhraseMatch are preferred
+      // For example, "blue cash" should prefer "Amex blue cash preferred" over "Cash"
+      // IMPORTANT: This cap ensures single-word candidates never beat multi-word candidates with partialPhraseMatch
+      if (transcriptIsMultiWord && candidateTokens.length === 1) {
+        // Cap single-word matches at 0.85 for multi-word transcripts
+        // This ensures multi-word candidates with partialPhraseMatch (score 1.0) always win
+        tokenScore = Math.min(0.85, tokenScore);
+      }
+      
+      // If we have a partial phrase match (transcript phrase appears in candidate),
+      // don't let token score override it - partial phrase matches are more specific
+      if (!partialPhraseMatch) {
+        score = Math.max(score, tokenScore);
+      }
+      // If partialPhraseMatch is true, keep score at 1.0 (set above)
     }
 
     // When scores are equal, prefer longer (more specific) matches
-    if (score > bestScore || (score === bestScore && candidate.length > best.length)) {
+    // Also, when transcript is multi-word and we have a partialPhraseMatch, prefer it over single-word candidates
+    const candidateIsMultiWord = candidateTokens.length > 1;
+    let bestIsSingleWord = false;
+    if (best) {
+      const bestTokens = normalizeForMatch(best).split(/\s+/).filter(Boolean);
+      bestIsSingleWord = bestTokens.length === 1;
+    }
+    
+    const preferThisCandidate = 
+      score > bestScore || 
+      (score === bestScore && candidate.length > best.length) ||
+      (score === bestScore && score === 1 && transcriptIsMultiWord && candidateIsMultiWord && partialPhraseMatch && bestIsSingleWord);
+    
+    if (preferThisCandidate) {
       bestScore = score;
       best = candidate;
     }
   }
 
   return bestScore >= (minScore ?? 0.3) ? best : "";
+}
+
+/**
+ * Attempts to split a compound word into potential component words.
+ * For example: "doublecash" → ["double", "cash"]
+ * This is a heuristic that looks for common word boundaries in camelCase or concatenated words.
+ * 
+ * @param {string} word - The compound word to split (should already be normalized/lowercase)
+ * @returns {string[]} - Array of potential word parts, or [word] if splitting doesn't make sense
+ */
+function splitCompoundWord(word) {
+  if (word.length < 6) {
+    // Too short to be a meaningful compound word
+    return [word];
+  }
+  
+  // Try to split on common patterns:
+  // 1. camelCase boundaries (lowercase followed by uppercase, but we're already lowercase)
+  // 2. Common word endings that might indicate a word boundary
+  
+  // For now, use a simple heuristic: look for common word patterns
+  // This is not perfect but handles common cases like "doublecash", "activecash", etc.
+  
+  // Try splitting at positions where we might have word boundaries
+  // Look for patterns like: word1 + word2 where word2 is a common word
+  
+  const commonWords = ['cash', 'card', 'bank', 'check', 'plus', 'active', 'double', 'triple'];
+  
+  for (const commonWord of commonWords) {
+    if (word.endsWith(commonWord) && word.length > commonWord.length) {
+      const prefix = word.slice(0, -commonWord.length);
+      if (prefix.length >= 3) { // Ensure prefix is meaningful
+        return [prefix, commonWord];
+      }
+    }
+    if (word.startsWith(commonWord) && word.length > commonWord.length) {
+      const suffix = word.slice(commonWord.length);
+      if (suffix.length >= 3) { // Ensure suffix is meaningful
+        return [commonWord, suffix];
+      }
+    }
+  }
+  
+  // If no pattern found, return the word as-is
+  return [word];
 }
 
 /**
@@ -279,14 +467,15 @@ export function extractCardName(transcript) {
   if (!transcript) return "";
   
   const lower = transcript.toLowerCase();
-  const chargeKeyword = "charge";
+  // Handle both "charge" and "charged" (common in transcripts)
+  const chargeKeyword = lower.includes("charged") ? "charged" : "charge";
   const categoryKeyword = "category";
   const descriptionKeyword = "description";
   
-  // STEP 1: Find "charge" keyword in the transcript
+  // STEP 1: Find "charge" or "charged" keyword in the transcript
   const chargeStartIdx = lower.indexOf(chargeKeyword);
   if (chargeStartIdx === -1) {
-    // FALLBACK: if no "charge" found, search entire transcript
+    // FALLBACK: if no "charge"/"charged" found, search entire transcript
     const cardNames = getCachedAccountNames();
     return bestMatchFromList(transcript, cardNames, 0.3);
   }
@@ -444,11 +633,12 @@ export function extractExpenseAmount(transcript) {
   if (!transcript) return "";
   
   const lower = transcript.toLowerCase();
-  const chargeKeyword = "charge";
+  // Handle both "charge" and "charged" (common in transcripts)
+  const chargeKeyword = lower.includes("charged") ? "charged" : "charge";
   const categoryKeyword = "category";
   const descriptionKeyword = "description";
   
-  // STEP 1: Find "charge" keyword in the transcript
+  // STEP 1: Find "charge" or "charged" keyword in the transcript
   const chargeStartIdx = lower.indexOf(chargeKeyword);
   let searchText = transcript;
   let searchTextLower = lower;
