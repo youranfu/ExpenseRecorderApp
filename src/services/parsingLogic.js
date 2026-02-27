@@ -1,18 +1,22 @@
 /**
- * Expense parsing logic - Ported from script.js
- * These functions extract structured data from transcribed text.
+ * Expense parsing logic — extracts structured data from transcribed text.
+ *
+ * Expected transcript pattern:
+ *   "Charge $XX.YY to <card>. Date is <date>. Category is <cat>. Description is <desc>"
+ *
+ * Also handles structured JSON responses from transcription APIs.
  */
 
 import { getAccountNames, getExpenseCategories } from "./configService";
 
-// Cached lists (loaded from AsyncStorage)
+// ---------------------------------------------------------------------------
+// Config list cache
+// ---------------------------------------------------------------------------
+
 let cachedAccountNames = null;
 let cachedExpenseCategories = null;
 
-/**
- * Load account names and expense categories from storage
- * Call this at app startup to cache the lists
- */
+/** Load account names and expense categories into cache. Call at app startup. */
 export async function loadConfigLists() {
   try {
     [cachedAccountNames, cachedExpenseCategories] = await Promise.all([
@@ -21,58 +25,152 @@ export async function loadConfigLists() {
     ]);
   } catch (error) {
     console.error("Error loading config lists:", error);
-    // Fallback to empty arrays if loading fails
     cachedAccountNames = [];
     cachedExpenseCategories = [];
   }
 }
 
-/**
- * Get cached account names (synchronous)
- * Returns empty array if not loaded yet
- */
 function getCachedAccountNames() {
   return cachedAccountNames || [];
 }
 
-/**
- * Get cached expense categories (synchronous)
- * Returns empty array if not loaded yet
- */
 function getCachedExpenseCategories() {
   return cachedExpenseCategories || [];
 }
 
-/**
- * Refresh the cached lists from storage
- */
+/** Refresh the cached lists from storage. */
 export async function refreshConfigLists() {
   await loadConfigLists();
 }
 
+// ---------------------------------------------------------------------------
+// JSON transcript reconstruction
+// ---------------------------------------------------------------------------
+
 /**
- * Builds an expense record object from a transcript string.
+ * Parses a JSON-shaped transcript and reconstructs natural-language text that
+ * the keyword-based parsers can process.
+ *
+ * Recognizes keys: amount, description, category, payment_method, card_name,
+ * date, query, text, transcript, payload.
+ *
+ * @param {string} transcript
+ * @returns {string|null} Natural-language transcript, or null if not JSON.
+ */
+export function tryReconstructTranscriptFromJson(transcript) {
+  if (!transcript || typeof transcript !== "string") return null;
+  let trimmed = transcript.trim();
+
+  // Strip wrapping quotes that some APIs add
+  if ((trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+      (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
+
+  if (!trimmed.startsWith("{")) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    const cleaned = trimmed.replace(/^[^{]*/, "").replace(/[^}]*$/, "");
+    try { parsed = JSON.parse(cleaned); } catch { return null; }
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+
+  // Prefer natural-language fields directly
+  for (const key of ["query", "text", "transcript", "payload"]) {
+    const val = parsed[key];
+    if (typeof val === "string" && val.length > 10) return val;
+  }
+
+  // Reconstruct from structured expense fields
+  const amount      = parsed.amount ?? parsed.expense_amount ?? parsed.total ?? "";
+  const card        = parsed.payment_method ?? parsed.card_name ?? parsed.card ?? "";
+  const category    = parsed.category ?? parsed.expense_category ?? "";
+  const description = parsed.description ?? "";
+  const date        = parsed.date ?? "";
+
+  if (!amount && !description && !category && !card) {
+    // Fallback: return longest string value (handles unknown schemas)
+    const strings = Object.values(parsed).filter((v) => typeof v === "string");
+    if (strings.length === 0) return null;
+    return strings.reduce((a, b) => (a.length >= b.length ? a : b));
+  }
+
+  const parts = [];
+  if (amount) {
+    const amtStr = typeof amount === "number" ? `$${amount.toFixed(2)}` : `$${String(amount).replace(/^\$/, "")}`;
+    parts.push(`Charge ${amtStr}`);
+  }
+  if (card)        parts.push(`to ${card}`);
+  if (date)        parts.push(`Date is ${date}`);
+  if (category)    parts.push(`Category is ${category}`);
+  if (description) parts.push(`Description is ${description}`);
+
+  return parts.join('. ');
+}
+
+// ---------------------------------------------------------------------------
+// Shared segment extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the text segment between "charge"/"charged" and the next keyword
+ * ("category" or "description"). Used by extractCardName and extractExpenseAmount.
+ *
+ * @param {string} transcript
+ * @returns {string|null} Cleaned segment text, or null if "charge" not found.
+ */
+function extractSegmentAfterCharge(transcript) {
+  const lower = transcript.toLowerCase();
+  const chargeKeyword = lower.includes("charged") ? "charged" : "charge";
+  const chargeStartIdx = lower.indexOf(chargeKeyword);
+  if (chargeStartIdx === -1) return null;
+
+  const chargeOffset = chargeStartIdx + chargeKeyword.length;
+  const afterCharge = lower.substring(chargeOffset);
+  const categoryIdx = afterCharge.indexOf("category");
+  const descriptionIdx = afterCharge.indexOf("description");
+
+  let endOffset;
+  if (categoryIdx !== -1 && descriptionIdx !== -1) {
+    endOffset = Math.min(categoryIdx, descriptionIdx);
+  } else {
+    endOffset = categoryIdx !== -1 ? categoryIdx
+              : descriptionIdx !== -1 ? descriptionIdx
+              : afterCharge.length;
+  }
+
+  const raw = transcript.substring(chargeOffset, chargeOffset + endOffset);
+  return raw.replace(/^[\s:,-]+/, "").replace(/[\s:,-.]+$/, "").trim() || null;
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds an expense record from a transcript string.
+ * Handles both natural-language transcripts and structured JSON from the API.
  */
 export function buildExpenseRecordFromTranscript(transcript) {
-  const date = extractDate(transcript) || "";
-  const cardName = extractCardName(transcript) || "";
-  const expenseAmount = extractExpenseAmount(transcript) || "";
-  const expenseCategory = extractExpenseCategory(transcript) || "";
-  const description = extractDescription(transcript) || "";
+  const text = tryReconstructTranscriptFromJson(transcript) || transcript;
 
   return {
-    date,
-    card_name: cardName,
-    expense_amount: expenseAmount,
-    expense_category: expenseCategory,
-    description,
+    date:             extractDate(text) || "",
+    card_name:        extractCardName(text) || "",
+    expense_amount:   extractExpenseAmount(text) || "",
+    expense_category: extractExpenseCategory(text) || "",
+    description:      sanitizeDescription(extractDescription(text)),
   };
 }
 
-/**
- * Extracts date from transcript.
- * Supports various formats: ISO dates, US dates, month names, "today", "yesterday".
- */
+// ---------------------------------------------------------------------------
+// Field extractors
+// ---------------------------------------------------------------------------
+
+/** Extracts date from transcript. Supports ISO, US numeric, month-name, "today", "yesterday". */
 export function extractDate(transcript) {
   const text = transcript.toLowerCase();
 
@@ -139,9 +237,9 @@ function toISODate(year, month, day) {
   return `${year}-${mm}-${dd}`;
 }
 
-// ----------------------------------------
-// Fuzzy helpers for matching against lists
-// ----------------------------------------
+// ---------------------------------------------------------------------------
+// Fuzzy matching helpers
+// ---------------------------------------------------------------------------
 
 function normalizeForMatch(text) {
   return text
@@ -157,8 +255,7 @@ function textTokens(text) {
     .map(stemToken);
 }
 
-// Very lightweight stemming so that simple plural/singular
-// differences (e.g. "groceries" vs "grocery") still match.
+// Lightweight stemming for plural/singular ("groceries" → "grocery").
 function stemToken(token) {
   if (token.length > 4 && token.endsWith("ies")) {
     return token.slice(0, -3) + "y";
@@ -172,11 +269,26 @@ function stemToken(token) {
   return token;
 }
 
+/**
+ * Fuzzy-matches transcript text against a list of candidates.
+ *
+ * Scoring strategy (in descending priority):
+ *   1. Exact phrase match of candidate in transcript          → 1.0
+ *   2. Transcript phrase found contiguously within candidate  → 1.0 (partial phrase)
+ *   3. Compound-word splitting ("doublecash" → "double cash") → phrase boost
+ *   4. Token overlap with stemming                            → overlap / candidateTokens
+ *   5. Compound-word bonus on token score                     → +0.4
+ *
+ * Tie-breaking: longer (more specific) candidates win. Multi-word partial-phrase
+ * matches beat single-word candidates at the same score.
+ */
 function bestMatchFromList(transcript, candidates, minScore) {
   const normalizedTranscript = normalizeForMatch(transcript);
   if (!normalizedTranscript) return "";
 
   const transcriptTokens = new Set(textTokens(transcript));
+  const transcriptTokensArray = normalizedTranscript.split(/\s+/).filter(Boolean);
+  const transcriptIsMultiWord = transcriptTokensArray.length > 1;
 
   let best = "";
   let bestScore = 0;
@@ -185,180 +297,105 @@ function bestMatchFromList(transcript, candidates, minScore) {
     const candidateNorm = normalizeForMatch(candidate);
     if (!candidateNorm) continue;
 
-    // If candidate string (normalized) appears as a complete phrase with word boundaries,
-    // give it a strong boost. Use word boundary matching to avoid substring issues
-    // (e.g., "cash" matching inside "doublecash").
-    // IMPORTANT: Check if the entire candidate phrase appears as a contiguous sequence,
-    // not just that all its words appear somewhere in the transcript.
     const candidateTokens = candidateNorm.split(/\s+/).filter(Boolean);
-    const transcriptTokensArray = normalizedTranscript.split(/\s+/).filter(Boolean);
-    const transcriptIsMultiWord = transcriptTokensArray.length > 1;
-    
     let phraseMatch = false;
-    let partialPhraseMatch = false; // Track if transcript phrase appears within candidate
-    
+    let partialPhraseMatch = false;
+
     if (candidateTokens.length > 0) {
-      // Check if transcript phrase appears as a contiguous sequence within the candidate
-      // For example, "blue cash" should match "Amex blue cash preferred"
-      // This check is done FIRST when transcript has multiple words to prefer longer matches
+      // Check if transcript meaningful phrase appears within the candidate
       if (transcriptIsMultiWord) {
-        // Filter out numbers and common words like "to", "for", etc. to get meaningful phrase
         const commonWords = new Set(['to', 'for', 'on', 'at', 'in', 'the', 'a', 'an']);
-        const meaningfulTokens = transcriptTokensArray.filter(tok => 
+        const meaningfulTokens = transcriptTokensArray.filter(tok =>
           !/^\d+$/.test(tok) && !commonWords.has(tok.toLowerCase())
         );
-        
-        // Check if meaningful tokens can form a phrase within the candidate
-        // We only need meaningfulTokens.length <= candidateTokens.length (not all transcript tokens)
+
         if (meaningfulTokens.length >= 2 && meaningfulTokens.length <= candidateTokens.length) {
-          // Try matching the meaningful phrase as a contiguous sequence
-          const transcriptPhrase = meaningfulTokens.join(' ');
-          const escapedTranscriptPhrase = transcriptPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const partialPhraseRegex = new RegExp(`\\b${escapedTranscriptPhrase}\\b`, 'i');
-          partialPhraseMatch = partialPhraseRegex.test(candidateNorm);
-          
-          // Fallback: check if all meaningful tokens appear in order in the candidate (with word boundaries)
-          // This handles cases where the phrase might be split by other words
-          if (!partialPhraseMatch && meaningfulTokens.length >= 2) {
-            let allTokensFoundInOrder = true;
+          const phrase = meaningfulTokens.join(' ');
+          const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          partialPhraseMatch = new RegExp(`\\b${escaped}\\b`, 'i').test(candidateNorm);
+
+          // Fallback: tokens in order within candidate
+          if (!partialPhraseMatch) {
+            let allInOrder = true;
             let searchStart = 0;
             for (const tok of meaningfulTokens) {
-              const escapedTok = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const tokenRegex = new RegExp(`\\b${escapedTok}\\b`, 'i');
-              const remainingText = candidateNorm.substring(searchStart);
-              const match = remainingText.match(tokenRegex);
-              if (!match) {
-                allTokensFoundInOrder = false;
-                break;
-              }
-              // Update searchStart to after the current match (relative to full string)
-              searchStart = searchStart + match.index + match[0].length;
+              const re = new RegExp(`\\b${tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+              const m = candidateNorm.substring(searchStart).match(re);
+              if (!m) { allInOrder = false; break; }
+              searchStart += m.index + m[0].length;
             }
-            // If all tokens found in order and candidate is multi-word, treat as partial match
-            if (allTokensFoundInOrder && candidateTokens.length > 1) {
-              partialPhraseMatch = true;
-            }
+            if (allInOrder && candidateTokens.length > 1) partialPhraseMatch = true;
           }
         }
       }
-      
-      // If candidate string (normalized) appears as a complete phrase with word boundaries,
-      // give it a strong boost. Use word boundary matching to avoid substring issues
-      // (e.g., "cash" matching inside "doublecash").
-      // IMPORTANT: For single-word candidates, only give perfect score if transcript is also single-word
+
+      // Check if candidate phrase appears in transcript (word-boundary)
       if (!partialPhraseMatch) {
-        const escapedTokens = candidateTokens.map(token => 
-          token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        );
-        // Create a regex that matches the entire phrase as a contiguous sequence with word boundaries
-        const phraseRegex = new RegExp(`\\b${escapedTokens.join('\\s+')}\\b`, 'i');
-        phraseMatch = phraseRegex.test(normalizedTranscript);
-        
-        // For single-word candidates with multi-word transcripts, don't give perfect score
-        // (e.g., "Cash" matching "blue cash" should not get 1.0)
+        const escapedTokens = candidateTokens.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        phraseMatch = new RegExp(`\\b${escapedTokens.join('\\s+')}\\b`, 'i').test(normalizedTranscript);
+        // Single-word candidates don't get perfect score for multi-word transcripts
         if (phraseMatch && candidateTokens.length === 1 && transcriptIsMultiWord) {
-          phraseMatch = false; // Downgrade to token matching instead
+          phraseMatch = false;
         }
       }
-      
-      // Also check if compound words in the candidate appear as phrases in the transcript
-      // For example, "doublecash" in "Citi DoubleCash" should match "double cash" in transcript
+
+      // Compound-word phrase matching (e.g. "doublecash" ↔ "double cash")
       if (!phraseMatch && !partialPhraseMatch) {
         for (const tok of candidateTokens) {
-          const splitTokens = splitCompoundWord(tok);
-          if (splitTokens.length > 1) {
-            // Check if the split tokens appear as a phrase in the transcript
-            const escapedSplitTokens = splitTokens.map(token => 
-              token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-            );
-            const splitPhraseRegex = new RegExp(`\\b${escapedSplitTokens.join('\\s+')}\\b`, 'i');
-            if (splitPhraseRegex.test(normalizedTranscript)) {
+          const parts = splitCompoundWord(tok);
+          if (parts.length > 1) {
+            const escaped = parts.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+            if (new RegExp(`\\b${escaped.join('\\s+')}\\b`, 'i').test(normalizedTranscript)) {
               phraseMatch = true;
-              break; // Found a compound word phrase match
+              break;
             }
           }
         }
       }
     }
-    
-    // Score: full phrase match = 1.0, partial phrase match = 1.0 (treat as perfect match)
-    // Partial phrase matches are when transcript phrase appears within candidate (e.g., "blue cash" in "Amex blue cash preferred")
-    // These should be treated as perfect matches to beat single-word candidates
-    // IMPORTANT: partialPhraseMatch is set above in the candidateTokens block, so it's available here
-    let score = 0;
-    if (phraseMatch) {
-      score = 1;
-    } else if (partialPhraseMatch) {
-      score = 1; // Partial phrase matches get perfect score
-    }
 
-    // Use textTokens to apply stemming to candidate tokens as well
+    let score = (phraseMatch || partialPhraseMatch) ? 1 : 0;
+
+    // Token overlap scoring with stemming and compound-word splitting
     const cTokens = textTokens(candidate);
     if (cTokens.length) {
       let overlap = 0;
-      let hasCompoundMatch = false; // Track if any compound word was split and matched
-      
+      let hasCompoundMatch = false;
+
       for (const tok of cTokens) {
         if (transcriptTokens.has(tok)) {
           overlap += 1;
         } else {
-          // Handle compound words: if a candidate token doesn't match directly,
-          // try splitting it into potential words and check if those words match.
-          // For example, "doublecash" → ["double", "cash"]
-          // This handles cases where "double cash" (two words) should match "DoubleCash" (compound word)
-          const splitTokens = splitCompoundWord(tok);
-          if (splitTokens.length > 1) {
-            // Check if all split tokens are present in the transcript
-            const allSplitTokensMatch = splitTokens.every(splitTok => transcriptTokens.has(splitTok));
-            if (allSplitTokensMatch) {
-              overlap += 1; // Count the compound word as one match
-              hasCompoundMatch = true; // Mark that we matched via compound word splitting
-            }
+          const parts = splitCompoundWord(tok);
+          if (parts.length > 1 && parts.every(p => transcriptTokens.has(p))) {
+            overlap += 1;
+            hasCompoundMatch = true;
           }
         }
       }
-      
-      const baseTokenScore = overlap / cTokens.length;
-      
-      // Bonus: if compound words matched, boost the score
-      // This helps "Citi DoubleCash" (score ~0.5 + bonus) beat "Cash" (score 1.0) when "double cash" is present
-      // The bonus is proportional to how well the compound word matched
-      const compoundBonus = hasCompoundMatch ? 0.4 : 0;
-      let tokenScore = Math.min(1.0, baseTokenScore + compoundBonus);
-      
-      // When transcript is multi-word and candidate is single-word, reduce the token score
-      // This ensures multi-word candidates with partialPhraseMatch are preferred
-      // For example, "blue cash" should prefer "Amex blue cash preferred" over "Cash"
-      // IMPORTANT: This cap ensures single-word candidates never beat multi-word candidates with partialPhraseMatch
+
+      let tokenScore = Math.min(1.0, overlap / cTokens.length + (hasCompoundMatch ? 0.4 : 0));
+
+      // Cap single-word candidates at 0.85 for multi-word transcripts
       if (transcriptIsMultiWord && candidateTokens.length === 1) {
-        // Cap single-word matches at 0.85 for multi-word transcripts
-        // This ensures multi-word candidates with partialPhraseMatch (score 1.0) always win
         tokenScore = Math.min(0.85, tokenScore);
       }
-      
-      // If we have a partial phrase match (transcript phrase appears in candidate),
-      // don't let token score override it - partial phrase matches are more specific
+
       if (!partialPhraseMatch) {
         score = Math.max(score, tokenScore);
       }
-      // If partialPhraseMatch is true, keep score at 1.0 (set above)
     }
 
-    // When scores are equal, prefer longer (more specific) matches
-    // Also, when transcript is multi-word and we have a partialPhraseMatch, prefer it over single-word candidates
+    // Prefer longer matches when tied; prefer multi-word partial-phrase over single-word
     const candidateIsMultiWord = candidateTokens.length > 1;
-    let bestIsSingleWord = false;
-    if (best) {
-      const bestTokens = normalizeForMatch(best).split(/\s+/).filter(Boolean);
-      bestIsSingleWord = bestTokens.length === 1;
-    }
-    
-    const preferThisCandidate = 
-      score > bestScore || 
+    const bestIsSingleWord = best && normalizeForMatch(best).split(/\s+/).filter(Boolean).length === 1;
+
+    const preferThis =
+      score > bestScore ||
       (score === bestScore && candidate.length > best.length) ||
       (score === bestScore && score === 1 && transcriptIsMultiWord && candidateIsMultiWord && partialPhraseMatch && bestIsSingleWord);
-    
-    if (preferThisCandidate) {
+
+    if (preferThis) {
       bestScore = score;
       best = candidate;
     }
@@ -367,14 +404,7 @@ function bestMatchFromList(transcript, candidates, minScore) {
   return bestScore >= (minScore ?? 0.3) ? best : "";
 }
 
-/**
- * Attempts to split a compound word into potential component words.
- * For example: "doublecash" → ["double", "cash"]
- * This is a heuristic that looks for common word boundaries in camelCase or concatenated words.
- * 
- * @param {string} word - The compound word to split (should already be normalized/lowercase)
- * @returns {string[]} - Array of potential word parts, or [word] if splitting doesn't make sense
- */
+/** Heuristic split of compound words: "doublecash" → ["double", "cash"]. */
 function splitCompoundWord(word) {
   if (word.length < 6) {
     // Too short to be a meaningful compound word
@@ -414,286 +444,38 @@ function splitCompoundWord(word) {
 
 /**
  * Extracts the card/account name from a transcript.
- * 
- * LOGIC OVERVIEW:
- * The card name is the text between "charge" and the next keyword (either "category" or "description").
- * This function extracts that text, cleans it, and matches it against the known account names list.
- * 
- * SUPPORTED PATTERNS:
- * - "Charge $30 to Chase Unlimited. Category is gift purchase. Description is groceries"
- *   → Extracts: "$30 to Chase Unlimited" → Matches: "Chase Unlimited"
- * - "Charge $30 to CITI COSTCO. Description is groceries"
- *   → Extracts: "$30 to CITI COSTCO" → Matches: "CITI COSTCO"
- * - "Charge to Chase Sapphire. Category is dining"
- *   → Extracts: "to Chase Sapphire" → Matches: "Chase Sapphire"
- * 
- * STEP-BY-STEP PROCESS:
- * 1. Find "charge" keyword in the transcript (case-insensitive)
- * 2. Find the next keyword: Try "category" first, then "description" (whichever comes first)
- * 3. Extract text between "charge" and the found keyword
- * 4. Clean extracted text: Remove leading/trailing separators (spaces, colons, commas, dashes)
- * 5. Match against account names list: Use fuzzy matching to find best match
- * 6. Return matched account name OR empty string if no match found
- * 
- * FALLBACK BEHAVIOR:
- * - If no "charge" keyword found: Search entire transcript for account name matches
- * - If no "category" or "description" found: Take everything after "charge"
- * - If extraction fails: Search entire transcript for account name matches
- * - If no match found: Return empty string (unlike category, we don't return raw text)
- * 
- * NOTE: The extracted text may contain the amount (e.g., "$30 to Chase"), but the fuzzy
- * matching will still find the account name correctly.
- * 
- * @param {string} transcript - The full transcript text
- * @returns {string} - The matched account name, or empty string if not found
- * 
- * @example
- * extractCardName("Charge $30 to Chase Unlimited. Category is gift purchase")
- * // Returns: "Chase Unlimited" (matched from account names list)
- * 
- * @example
- * extractCardName("Charge to CITI COSTCO. Description is groceries")
- * // Returns: "CITI COSTCO" (matched from account names list)
- * 
- * @example
- * extractCardName("Charge $4,000 to Amazon Visa")
- * // Returns: "Amazon Visa" (matched from account names list)
- * 
- * @example
- * extractCardName("No charge keyword here")
- * // Returns: "" (empty string, falls back to searching entire transcript)
+ * Finds text between "charge" and the next keyword, then fuzzy-matches
+ * against the configured account names list.
+ * Falls back to searching the entire transcript if no "charge" keyword found.
  */
 export function extractCardName(transcript) {
   if (!transcript) return "";
-  
-  const lower = transcript.toLowerCase();
-  // Handle both "charge" and "charged" (common in transcripts)
-  const chargeKeyword = lower.includes("charged") ? "charged" : "charge";
-  const categoryKeyword = "category";
-  const descriptionKeyword = "description";
-  
-  // STEP 1: Find "charge" or "charged" keyword in the transcript
-  const chargeStartIdx = lower.indexOf(chargeKeyword);
-  if (chargeStartIdx === -1) {
-    // FALLBACK: if no "charge"/"charged" found, search entire transcript
-    const cardNames = getCachedAccountNames();
-    return bestMatchFromList(transcript, cardNames, 0.3);
-  }
-  
-  const chargeOffset = chargeStartIdx + chargeKeyword.length;
-  
-  // STEP 2: Find the next keyword ("category" or "description") after "charge"
-  const afterCharge = lower.substring(chargeOffset);
-  const categoryIdx = afterCharge.indexOf(categoryKeyword);
-  const descriptionIdx = afterCharge.indexOf(descriptionKeyword);
-  
-  let nextKeywordOffset;
-  if (categoryIdx !== -1 && descriptionIdx !== -1) {
-    // Both found - use whichever comes first
-    nextKeywordOffset = Math.min(categoryIdx, descriptionIdx);
-  } else if (categoryIdx !== -1) {
-    nextKeywordOffset = categoryIdx;
-  } else if (descriptionIdx !== -1) {
-    nextKeywordOffset = descriptionIdx;
-  } else {
-    // FALLBACK: If no "category" or "description" found, take everything after "charge"
-    let cardText = transcript.substring(chargeOffset);
-    cardText = cardText
-      .replace(/^[\s:,-]+/i, "") // Remove leading separators
-      .replace(/[\s:,-]+$/i, "") // Remove trailing separators
-      .trim();
-    
-    if (!cardText) {
-      const cardNames = getCachedAccountNames();
-      return bestMatchFromList(transcript, cardNames, 0.3);
-    }
-    
-    const cardNames = getCachedAccountNames();
-    return bestMatchFromList(cardText, cardNames, 0.3);
-  }
-  
-  // STEP 3: Extract text between "charge" and the next keyword
-  const cardText = transcript.substring(
-    chargeOffset,
-    chargeOffset + nextKeywordOffset
-  );
-  
-  // STEP 4: Clean up the extracted text
-  const cleanedCardText = cardText
-    .replace(/^[\s:,-]+/i, "") // Remove leading separators
-    .replace(/[\s:,-.]+$/i, "") // Remove trailing separators and periods
-    .trim();
-  
-  if (!cleanedCardText) {
-    // FALLBACK: if extraction failed, search entire transcript
-    const cardNames = getCachedAccountNames();
-    return bestMatchFromList(transcript, cardNames, 0.3);
-  }
-  
-  // STEP 5: Match the extracted text against the account names list
   const cardNames = getCachedAccountNames();
-  const matched = bestMatchFromList(cleanedCardText, cardNames, 0.3);
-  
-  // STEP 6: Return matched account name or empty string
-  return matched || "";
+  const segment = extractSegmentAfterCharge(transcript);
+  if (!segment) return bestMatchFromList(transcript, cardNames, 0.3);
+  return bestMatchFromList(segment, cardNames, 0.3) || "";
 }
 
 /**
- * Extracts the expense amount from a transcript.
- * 
- * LOGIC OVERVIEW:
- * The amount is the text between "charge" and the next keyword (either "category" or "description").
- * This function first extracts that text segment, then searches for monetary amounts in various
- * formats within that segment, and normalizes them to a standard format: "XX.XX" (dollars.cents as a string).
- * 
- * The function tries patterns in order of specificity (most specific first) to avoid false matches.
- * For example, "cents only" is checked before general dollar patterns to correctly handle "99 cents" vs "$99".
- * 
- * SUPPORTED PATTERNS (in order of matching):
- * 
- * 1. VERBAL FORMAT: "XX dollars (and YY cents)" where cents is optional
- *    - "325 dollars" → "325.00"
- *    - "325 dollars and 39 cents" → "325.39"
- *    - "4,000 dollars" → "4000.00"
- *    - "4,000 dollars and 50 cents" → "4000.50"
- *    - Checked FIRST to avoid matching just "39 cents" from "325 dollars and 39 cents"
- * 
- * 2. CENTS ONLY: "XX cents" (without dollars)
- *    - "99 cents" → "0.99"
- *    - "5 cents" → "0.05"
- *    - "1 cent" → "0.01"
- * 
- * 3. DOLLAR SIGN WITH COMMAS: "$XX,XXX.XX" or "$XX,XXX"
- *    - "$4,000" → "4000.00"
- *    - "$4,000.50" → "4000.50"
- *    - "$1,234,567.89" → "1234567.89"
- *    - "$30.5" → "30.50" (single digit cents padded)
- * 
- * 4. NUMBER WITH COMMAS (no dollar sign): "XX,XXX.XX" or "XX,XXX"
- *    - "4,000" → "4000.00"
- *    - "4,000.50" → "4000.50"
- *    - Only matches if number has commas OR is >= 10 (to avoid false matches)
- * 
- * 5. DOLLAR SIGN WITHOUT COMMAS: "$XX.XX" or "$XX"
- *    - "$30" → "30.00"
- *    - "$30.5" → "30.50"
- *    - "$30.50" → "30.50"
- * 
- * STEP-BY-STEP PROCESS:
- * 1. Find "charge" keyword in the transcript (case-insensitive)
- * 2. Find the next keyword: Try "category" first, then "description" (whichever comes first)
- * 3. Extract text segment between "charge" and the found keyword
- * 4. Clean extracted text: Remove leading/trailing separators
- * 5. Search for amount patterns in the extracted segment (in order of specificity)
- * 6. Normalize found amount to "XX.XX" format
- * 7. Return normalized amount OR empty string if no pattern matches
- * 
- * FALLBACK BEHAVIOR:
- * - If no "charge" keyword found: Search entire transcript for amount patterns
- * - If no "category" or "description" found: Search everything after "charge" for amount patterns
- * - If extraction fails: Search entire transcript for amount patterns
- * 
- * NORMALIZATION RULES:
- * - All amounts are returned as strings in "XX.XX" format
- * - Cents are always 2 digits (padded with 0 if needed)
- * - Commas are removed from numbers
- * - Single-digit cents are padded (e.g., "$30.5" → "30.50")
- * 
- * EDGE CASES HANDLED:
- * - Single digit cents: "$30.5" → "30.50" (padded to 2 digits)
- * - Cents without dollars: "99 cents" → "0.99"
- * - Large numbers with commas: "$1,234,567.89" → "1234567.89"
- * - Verbal format: "325 dollars and 39 cents" → "325.39"
- * - Numbers without dollar sign: "4,000" → "4000.00" (only if >= 10 or has commas)
- * 
- * @param {string} transcript - The full transcript text
- * @returns {string} - The extracted amount in "XX.XX" format, or empty string if not found
- * 
- * @example
- * extractExpenseAmount("Charge $30 to Chase Unlimited. Category is gift purchase")
- * // Extracts segment: "$30 to Chase Unlimited" → Finds: "$30" → Returns: "30.00"
- * 
- * @example
- * extractExpenseAmount("Charge $4,000.50 to CITI COSTCO. Description is groceries")
- * // Extracts segment: "$4,000.50 to CITI COSTCO" → Finds: "$4,000.50" → Returns: "4000.50"
- * 
- * @example
- * extractExpenseAmount("Charge 325 dollars and 39 cents to card")
- * // Extracts segment: "325 dollars and 39 cents to card" → Finds: "325 dollars and 39 cents" → Returns: "325.39"
- * 
- * @example
- * extractExpenseAmount("Charge 99 cents to card")
- * // Extracts segment: "99 cents to card" → Finds: "99 cents" → Returns: "0.99"
- * 
- * @example
- * extractExpenseAmount("No charge keyword here")
- * // Falls back to searching entire transcript → Returns: "" (empty string)
+ * Extracts a monetary amount from the transcript. Searches the segment between
+ * "charge" and the next keyword first; falls back to the entire transcript.
+ *
+ * Pattern priority (most specific first):
+ *   1. "XX dollars (and YY cents)"  → verbal format
+ *   2. "XX cents"                   → cents only
+ *   3. "$XX,XXX.XX"                → dollar sign with commas
+ *   4. "XX,XXX.XX" (no $)          → bare number with commas (>=10)
+ *   5. "$XX.XX"                    → dollar sign without commas
+ *
+ * All amounts returned as "XX.XX" strings with 2-digit cents.
  */
 export function extractExpenseAmount(transcript) {
   if (!transcript) return "";
-  
-  const lower = transcript.toLowerCase();
-  // Handle both "charge" and "charged" (common in transcripts)
-  const chargeKeyword = lower.includes("charged") ? "charged" : "charge";
-  const categoryKeyword = "category";
-  const descriptionKeyword = "description";
-  
-  // STEP 1: Find "charge" or "charged" keyword in the transcript
-  const chargeStartIdx = lower.indexOf(chargeKeyword);
-  let searchText = transcript;
-  let searchTextLower = lower;
-  
-  if (chargeStartIdx !== -1) {
-    const chargeOffset = chargeStartIdx + chargeKeyword.length;
-    
-    // STEP 2: Find the next keyword ("category" or "description") after "charge"
-    const afterCharge = lower.substring(chargeOffset);
-    const categoryIdx = afterCharge.indexOf(categoryKeyword);
-    const descriptionIdx = afterCharge.indexOf(descriptionKeyword);
-    
-    let nextKeywordOffset;
-    if (categoryIdx !== -1 && descriptionIdx !== -1) {
-      // Both found - use whichever comes first
-      nextKeywordOffset = Math.min(categoryIdx, descriptionIdx);
-    } else if (categoryIdx !== -1) {
-      nextKeywordOffset = categoryIdx;
-    } else if (descriptionIdx !== -1) {
-      nextKeywordOffset = descriptionIdx;
-    } else {
-      // FALLBACK: If no "category" or "description" found, take everything after "charge"
-      nextKeywordOffset = afterCharge.length;
-    }
-    
-    // STEP 3: Extract text segment between "charge" and the next keyword
-    const amountText = transcript.substring(
-      chargeOffset,
-      chargeOffset + nextKeywordOffset
-    );
-    
-    // STEP 4: Clean extracted text
-    const cleanedAmountText = amountText
-      .replace(/^[\s:,-]+/i, "") // Remove leading separators
-      .replace(/[\s:,-]+$/i, "") // Remove trailing separators
-      .trim();
-    
-    if (cleanedAmountText) {
-      // Use the extracted segment for pattern matching
-      searchText = cleanedAmountText;
-      searchTextLower = cleanedAmountText.toLowerCase();
-    }
-    // If extraction failed, fall back to searching entire transcript
-  }
-  // If no "charge" found, searchText remains as entire transcript (fallback)
-  
-  // STEP 5: Search for amount patterns in the extracted segment (or entire transcript)
-  const text = searchTextLower;
 
-  // PATTERN 1: "XX dollars (and YY cents)" where cents part is optional
-  // Matches: "325 dollars" -> 325.00
-  // Matches: "325 dollars and 39 cents" -> 325.39
-  // Matches: "4,000 dollars" -> 4000.00
-  // Checked FIRST because it's more specific than "cents only" pattern
-  // This prevents "325 dollars and 39 cents" from matching just "39 cents"
+  const segment = extractSegmentAfterCharge(transcript);
+  const text = (segment || transcript).toLowerCase();
+
+  // 1. "XX dollars (and YY cents)"
   const dollarsPattern = text.match(/\b([\d,]+)\s+dollars?(?:\s+and\s+(\d+)\s+cents?)?/);
   if (dollarsPattern) {
     const dollars = dollarsPattern[1].replace(/,/g, '');
@@ -701,122 +483,52 @@ export function extractExpenseAmount(transcript) {
     return `${dollars}.${cents}`;
   }
 
-  // PATTERN 2: "XX cents" (without dollars) -> 0.XX
-  // Matches: "99 cents" -> 0.99
-  // Matches: "5 cents" -> 0.05
-  // Checked after dollars pattern to avoid false matches
+  // 2. "XX cents" (no dollars)
   const centsOnlyPattern = text.match(/\b(\d+)\s+cents?\b/);
   if (centsOnlyPattern) {
     const cents = centsOnlyPattern[1].padStart(2, '0').substring(0, 2);
     return `0.${cents}`;
   }
 
-  // PATTERN 3: "$XX,XXX.XX" or "$XX,XXX" format (with commas)
-  // Matches: "$4,000" -> 4000.00
-  // Matches: "$4,000.50" -> 4000.50
-  // Matches: "$1,234,567.89" -> 1234567.89
-  // Handles large amounts with comma separators
+  // 3. "$XX,XXX.XX" or "$XX,XXX"
   const dollarSignWithCommasPattern = text.match(/\$([\d,]+)(?:\.(\d{1,2}))?/);
   if (dollarSignWithCommasPattern) {
     const dollars = dollarSignWithCommasPattern[1].replace(/,/g, '');
-    let cents = '00';
-    if (dollarSignWithCommasPattern[2]) {
-      cents = dollarSignWithCommasPattern[2].length === 1 
-        ? dollarSignWithCommasPattern[2] + '0' 
-        : dollarSignWithCommasPattern[2];
-    }
+    const cents = normalizeCents(dollarSignWithCommasPattern[2]);
     return `${dollars}.${cents}`;
   }
 
-  // PATTERN 4: "XX,XXX.XX" or "XX,XXX" format (without dollar sign, with commas)
-  // Matches: "4,000" -> 4000.00
-  // Matches: "4,000.50" -> 4000.50
-  // Matches: "1,234,567.89" -> 1234567.89
-  // Only processes if number has commas OR is >= 10 (to avoid false matches with small numbers)
+  // 4. Bare number with commas or >= 10 (no dollar sign)
   const numberWithCommasPattern = text.match(/\b([\d,]+)(?:\.(\d{1,2}))?\b/);
   if (numberWithCommasPattern) {
     const numberStr = numberWithCommasPattern[1].replace(/,/g, '');
-    // Only process if it looks like a dollar amount (has commas or is reasonably large)
-    // Skip single/double digit numbers that might be part of other text
     if (numberWithCommasPattern[1].includes(',') || parseInt(numberStr) >= 10) {
-      let cents = '00';
-      if (numberWithCommasPattern[2]) {
-        cents = numberWithCommasPattern[2].length === 1 
-          ? numberWithCommasPattern[2] + '0' 
-          : numberWithCommasPattern[2];
-      }
+      const cents = normalizeCents(numberWithCommasPattern[2]);
       return `${numberStr}.${cents}`;
     }
   }
 
-  // PATTERN 5: "$XX.XX" or "$XX" format (without commas)
-  // Matches: "$30" -> 30.00
-  // Matches: "$30.5" -> 30.50
-  // Matches: "$30.50" -> 30.50
-  // Handles standard dollar amounts without comma separators
+  // 5. "$XX.XX" or "$XX"
   const dollarSignPattern = text.match(/\$(\d+)(?:\.(\d{1,2}))?/);
   if (dollarSignPattern) {
     const dollars = dollarSignPattern[1];
-    let cents = '00';
-    if (dollarSignPattern[2]) {
-      cents = dollarSignPattern[2].length === 1 
-        ? dollarSignPattern[2] + '0' 
-        : dollarSignPattern[2];
-    }
+    const cents = normalizeCents(dollarSignPattern[2]);
     return `${dollars}.${cents}`;
   }
 
-
-  // No pattern matched - return empty string
   return "";
 }
 
+/** Normalizes a captured cents group to 2 digits ("5" → "50", undefined → "00"). */
+function normalizeCents(raw) {
+  if (!raw) return '00';
+  return raw.length === 1 ? raw + '0' : raw;
+}
+
 /**
- * Extracts the expense category from a transcript.
- * 
- * LOGIC OVERVIEW:
- * The category is always the text between the category keyword and the description keyword.
- * This function extracts that text, cleans it, and matches it against the known category list.
- * 
- * SUPPORTED PATTERNS:
- * - "Category is gift purchase. Description is parents visiting groceries"
- *   → Extracts: "gift purchase"
- * - "Category gift purchase. Description is parents visiting groceries"
- *   → Extracts: "gift purchase"
- * - "Category is gift purchase. Description parents visiting groceries"
- *   → Extracts: "gift purchase"
- * - "Category gift purchase. Description parents visiting groceries"
- *   → Extracts: "gift purchase"
- * 
- * STEP-BY-STEP PROCESS:
- * 1. Find category keyword: Try "category is" first, fall back to "category"
- * 2. Find description keyword: Try "description is" first, fall back to "description"
- *    (must appear AFTER the category keyword)
- * 3. Extract text between the two keywords
- * 4. Clean extracted text: Remove leading/trailing separators (spaces, colons, commas, dashes)
- * 5. Match against category list: Use fuzzy matching to find best match
- * 6. Return matched category OR cleaned extracted text if no match found
- * 
- * FALLBACK BEHAVIOR:
- * - If no category keyword found: Search entire transcript for category matches
- * - If no description keyword found: Take everything after category keyword
- * - If extraction fails: Search entire transcript for category matches
- * - If no match found but text extracted: Return cleaned extracted text (for new categories)
- * 
- * @param {string} transcript - The full transcript text
- * @returns {string} - The matched category name or the extracted category text
- * 
- * @example
- * extractExpenseCategory("Category is gift purchase. Description is groceries")
- * // Returns: "Gift purchase" (matched from category list)
- * 
- * @example
- * extractExpenseCategory("Category gift purchase. Description groceries")
- * // Returns: "Gift purchase" (matched from category list)
- * 
- * @example
- * extractExpenseCategory("Category is new category. Description is something")
- * // Returns: "new category" (no match found, returns extracted text)
+ * Extracts the expense category from the text between "category" and "description".
+ * Fuzzy-matches against configured categories; returns raw extracted text if no match
+ * (allows new categories not yet in the list).
  */
 export function extractExpenseCategory(transcript) {
   if (!transcript) return "";
@@ -904,53 +616,27 @@ export function extractExpenseCategory(transcript) {
   return cleanedCategoryText;
 }
 
-/**
- * Extracts the expense description from a transcript.
- * 
- * LOGIC OVERVIEW:
- * The description is everything after the description keyword until the end of the transcript.
- * This function finds the description keyword, extracts everything after it, and cleans it up.
- * 
- * SUPPORTED PATTERNS:
- * - "Description is parents visiting groceries"
- *   → Extracts: "parents visiting groceries"
- * - "Description parents visiting groceries"
- *   → Extracts: "parents visiting groceries"
- * - "Category is gift purchase. Description is parents visiting groceries"
- *   → Extracts: "parents visiting groceries"
- * - "Description: parents visiting groceries"
- *   → Extracts: "parents visiting groceries" (colon removed)
- * - "Description - parents visiting groceries"
- *   → Extracts: "parents visiting groceries" (dash removed)
- * 
- * STEP-BY-STEP PROCESS:
- * 1. Find description keyword: Try "description is" first, fall back to "description"
- * 2. Extract everything after the keyword (to end of transcript)
- * 3. Clean extracted text: Remove leading separators (spaces, colons, commas, dashes)
- * 4. Return cleaned text
- * 
- * NOTE: This function extracts everything after the description keyword, even if there's
- * more text after it. It assumes the description is the last meaningful part of the transcript.
- * 
- * @param {string} transcript - The full transcript text
- * @returns {string} - The extracted description text, or empty string if not found
- * 
- * @example
- * extractDescription("Category is gift purchase. Description is parents visiting groceries")
- * // Returns: "parents visiting groceries"
- * 
- * @example
- * extractDescription("Description is dinner with friends")
- * // Returns: "dinner with friends"
- * 
- * @example
- * extractDescription("Description: monthly subscription fee")
- * // Returns: "monthly subscription fee"
- * 
- * @example
- * extractDescription("No description keyword here")
- * // Returns: "" (empty string)
- */
+// Characters that must never appear in a description.
+// Uses split/join (not regex char classes) for cross-engine safety (V8, Hermes, JSC).
+const DESCRIPTION_BAD_CHARS = ['"', '{', '}', '[', ']', ':', ';', '\\', '<', '>', '`', '~', '^', '|'];
+
+/** Strips JSON/special chars from description. Result starts and ends with [a-zA-Z0-9]. */
+export function sanitizeDescription(str) {
+  if (str == null || typeof str !== "string") return "";
+  let s = str;
+  // Step 1: Remove each known-bad character by replacing with a space (no regex ambiguity)
+  for (const ch of DESCRIPTION_BAD_CHARS) {
+    s = s.split(ch).join(" ");
+  }
+  // Step 2: Collapse runs of whitespace and trim
+  s = s.replace(/\s+/g, " ").trim();
+  // Step 3: Trim non-alphanumeric leftovers from both ends (periods, commas, dashes, etc.)
+  while (s.length > 0 && !/[a-zA-Z0-9]/.test(s.charAt(0))) s = s.slice(1);
+  while (s.length > 0 && !/[a-zA-Z0-9]/.test(s.charAt(s.length - 1))) s = s.slice(0, -1);
+  return s.trim();
+}
+
+/** Extracts everything after "description (is)" and sanitizes it. */
 export function extractDescription(transcript) {
   if (!transcript) return "";
   const lower = transcript.toLowerCase();
@@ -970,12 +656,12 @@ export function extractDescription(transcript) {
   }
 
   // STEP 2: Extract everything after the keyword (to end of transcript)
-  // Use original transcript to preserve casing/punctuation
   let after = transcript.slice(offset);
 
   // STEP 3: Clean up - remove leading separators like ":", "-", ",", spaces, etc.
   after = after.replace(/^[\s:,-]+/i, "").trim();
 
-  return after;
+  // STEP 4: Sanitize to letters, numbers, and safe punctuation only (no JSON/special chars)
+  return sanitizeDescription(after);
 }
 

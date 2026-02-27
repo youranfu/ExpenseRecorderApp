@@ -188,7 +188,7 @@ adb devices
 ```
 (Should show your device)
 
-3. Install the APK:
+3. Install the APK (be sure to build it!):
 ```bash
 cd ExpenseRecorderApp/android
 adb install app/build/outputs/apk/release/app-release.apk

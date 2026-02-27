@@ -27,7 +27,10 @@ import {
   getIsRecording,
   cleanupRecording,
 } from "./src/services/audioService";
-import { sendAudioToTranscriptionAPIAlternative as sendAudioToTranscriptionAPI } from "./src/services/transcriptionService";
+import {
+  sendAudioToTranscriptionAPIAlternative as sendAudioToTranscriptionAPI,
+  toPlainTranscriptString,
+} from "./src/services/transcriptionService";
 import {
   buildExpenseRecordFromTranscript,
   loadConfigLists,
@@ -65,6 +68,7 @@ export default function App() {
   const [googleUser, setGoogleUser] = useState(null);
   const [spreadsheetId, setSpreadsheetIdState] = useState("");
   const [lastSavedRow, setLastSavedRow] = useState(null);
+  const [debugInfo, setDebugInfo] = useState(null);
   const recordingTimeoutRef = useRef(null);
   
   // Settings UI state
@@ -471,21 +475,36 @@ export default function App() {
 
       console.log("Transcription raw response:", transcription);
 
+      // --- DEBUG: Capture raw API response ---
+      const rawApiResponseStr = JSON.stringify(transcription, null, 2);
+
       // Extract text from response
-      const textField =
+      const rawField =
         typeof transcription.text === "string"
           ? transcription.text
           : typeof transcription.transcript === "string"
           ? transcription.transcript
+          : typeof transcription.query === "string"
+          ? transcription.query
           : "";
 
-      if (textField) {
-        const transcriptText = textField.trim();
+      if (rawField) {
+        // toPlainTranscriptString handles all JSON unwrapping, reconstruction, and cleanup
+        const transcriptText = toPlainTranscriptString(rawField) || rawField.trim();
+
         setTranscript(transcriptText || "Transcription returned empty text.");
         
         // Parse expense record
         const record = buildExpenseRecordFromTranscript(transcriptText);
         
+        // --- DEBUG: Capture all stages for on-device debugging ---
+        setDebugInfo({
+          rawApiResponse: rawApiResponseStr,
+          rawTextField: rawField,
+          cleanedTranscript: transcriptText,
+          parsedRecord: record,
+        });
+
         // Save to Google Sheets (only if signed in)
         if (isGoogleSignedIn) {
         setStatus("Saving expense record to Google Sheet…");
@@ -511,6 +530,13 @@ export default function App() {
           setLastSavedRow(null);
         }
       } else {
+        // --- DEBUG: Capture failure case too ---
+        setDebugInfo({
+          rawApiResponse: rawApiResponseStr,
+          rawTextField: "(no usable text field found)",
+          cleanedTranscript: "",
+          parsedRecord: null,
+        });
         setError(
           "Transcription response did not include a usable text field. Check console for raw response."
         );
@@ -597,9 +623,9 @@ export default function App() {
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Last transcript</Text>
-          <View style={styles.transcript}>
+          <ScrollView style={styles.transcript} nestedScrollEnabled>
             <Text style={styles.transcriptText}>{transcript}</Text>
-          </View>
+          </ScrollView>
         </View>
 
         {lastSavedRow && (
@@ -683,6 +709,62 @@ export default function App() {
             </TouchableOpacity>
           )}
         </View>
+
+        {debugInfo && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Debug: Processing Pipeline</Text>
+
+            <Text style={styles.debugStageLabel}>1. Raw API Response</Text>
+            <ScrollView style={styles.debugBox} nestedScrollEnabled>
+              <Text style={styles.debugText} selectable>{debugInfo.rawApiResponse}</Text>
+            </ScrollView>
+
+            <Text style={styles.debugStageLabel}>2. Cleaned / Parsed Transcript</Text>
+            <View style={styles.debugBox}>
+              <Text style={styles.debugText} selectable>{debugInfo.cleanedTranscript || "(empty)"}</Text>
+            </View>
+
+            {debugInfo.parsedRecord && (
+              <>
+                <Text style={styles.debugStageLabel}>3. Parsed Fields</Text>
+                <View style={styles.debugFieldsContainer}>
+                  <View style={styles.debugFieldRow}>
+                    <Text style={styles.debugFieldLabel}>Date:</Text>
+                    <Text style={styles.debugFieldValue} selectable>
+                      {debugInfo.parsedRecord.date || "(empty)"}
+                    </Text>
+                  </View>
+                  <View style={styles.debugFieldRow}>
+                    <Text style={styles.debugFieldLabel}>Card:</Text>
+                    <Text style={styles.debugFieldValue} selectable>
+                      {debugInfo.parsedRecord.card_name || "(empty)"}
+                    </Text>
+                  </View>
+                  <View style={styles.debugFieldRow}>
+                    <Text style={styles.debugFieldLabel}>Amount:</Text>
+                    <Text style={[styles.debugFieldValue, styles.debugAmountValue]} selectable>
+                      {debugInfo.parsedRecord.expense_amount
+                        ? `$${debugInfo.parsedRecord.expense_amount}`
+                        : "(empty)"}
+                    </Text>
+                  </View>
+                  <View style={styles.debugFieldRow}>
+                    <Text style={styles.debugFieldLabel}>Category:</Text>
+                    <Text style={styles.debugFieldValue} selectable>
+                      {debugInfo.parsedRecord.expense_category || "(empty)"}
+                    </Text>
+                  </View>
+                  <View style={[styles.debugFieldRow, styles.debugFieldRowLast]}>
+                    <Text style={styles.debugFieldLabel}>Description:</Text>
+                    <Text style={styles.debugFieldValue} selectable>
+                      {debugInfo.parsedRecord.description || "(empty)"}
+                    </Text>
+                  </View>
+                </View>
+              </>
+            )}
+          </View>
+        )}
 
         {isProcessing && (
           <View style={styles.loadingOverlay}>
@@ -1055,6 +1137,67 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 20,
     color: "#4b5563",
+  },
+  debugStageLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#92400e",
+    marginTop: 10,
+    marginBottom: 4,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  debugBox: {
+    backgroundColor: "#fffbeb",
+    borderRadius: 8,
+    padding: 10,
+    maxHeight: 150,
+    borderWidth: 1,
+    borderColor: "#fcd34d",
+  },
+  debugText: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: "#78350f",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+  },
+  debugFieldsContainer: {
+    backgroundColor: "#fffbeb",
+    borderRadius: 8,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "#fcd34d",
+  },
+  debugFieldRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 8,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(252, 211, 77, 0.4)",
+  },
+  debugFieldRowLast: {
+    borderBottomWidth: 0,
+    marginBottom: 0,
+    paddingBottom: 0,
+  },
+  debugFieldLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#92400e",
+    flex: 1,
+  },
+  debugFieldValue: {
+    fontSize: 12,
+    color: "#78350f",
+    flex: 2,
+    textAlign: "right",
+    fontWeight: "500",
+  },
+  debugAmountValue: {
+    color: "#dc2626",
+    fontWeight: "700",
   },
   loadingOverlay: {
     position: "absolute",
